@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pty-daemon",
+    "crates/shell-parser",
+    "ghost-complete/crates/gc-buffer",
+    "ghost-complete/crates/gc-config",
+    "ghost-complete/crates/gc-jsrt",
+    "ghost-complete/crates/gc-suggest",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+license = "MIT"
+authors = []
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+toml = "1"
+tracing-core = "0.1"
+crossterm = "0.29"

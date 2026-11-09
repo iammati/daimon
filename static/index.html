@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>daimon</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #0f1117; overflow: hidden; font-family: monospace; }
+  #app { display: flex; height: 100vh; }
+  #sidebar {
+    width: 200px; min-width: 200px; background: #13151c; border-right: 1px solid #1e2535;
+    display: flex; flex-direction: column;
+  }
+  #sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
+  #tab-list { flex: 1; overflow-y: auto; padding: 8px 4px; }
+  .tab-item {
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; color: #94a3b8;
+    font-size: 12px; display: flex; align-items: center; gap: 8px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    user-select: none;
+  }
+  .tab-item:hover { background: #1e2535; color: #e2e8f0; }
+  .tab-item.active { background: #1e2535; color: #7dd3a8; }
+  .tab-dot { width: 6px; height: 6px; border-radius: 50%; background: #475569; flex-shrink: 0; }
+  .tab-item.active .tab-dot { background: #7dd3a8; }
+  #add-tab {
+    margin: 4px; padding: 7px 10px; border-radius: 6px; cursor: pointer;
+    color: #475569; font-size: 12px; border: 1px dashed #1e2535; background: none;
+    text-align: left; font-family: monospace;
+  }
+  #add-tab:hover { color: #94a3b8; border-color: #2a3444; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #statusbar {
+    padding: 4px 12px; font-size: 11px; color: #475569;
+    border-bottom: 1px solid #1e2535; display: flex; align-items: center; gap: 8px;
+    flex-shrink: 0;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  #terminal-container { flex: 1; position: relative; overflow: hidden; }
+  .term-pane { position: absolute; inset: 0; padding: 6px; display: none; }
+  .term-pane.active { display: block; }
+  .xterm { height: 100%; }
+  .xterm-viewport { border-radius: 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <div id="tab-list"></div>
+    <button id="add-tab">+ New Tab</button>
+  </div>
+  <div id="main">
+    <div id="statusbar">
+      <span class="dot" id="ws-dot" style="background:#f87171"></span>
+      <span id="ws-label">connecting…</span>
+    </div>
+    <div id="terminal-container"></div>
+  </div>
+</div>
+
+<script type="module">
+import { Terminal } from 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/+esm';
+import { FitAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/+esm';
+import { WebLinksAddon } from 'https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/+esm';
+
+const WS_URL = 'ws://localhost:7878';
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+
+let ws = null;
+const outputCbs = new Map(); // tabId → (data) => void
+const exitCbs   = new Map();
+
+function wsConnect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    document.getElementById('ws-dot').style.background = '#4ade80';
+    document.getElementById('ws-label').textContent = 'daimon';
+    // re-open all existing tabs
+    tabs.forEach((_, id) => wsSend({ type: 'write', tab_id: id, data: '' }));
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-dot').style.background = '#f87171';
+    document.getElementById('ws-label').textContent = 'reconnecting…';
+    setTimeout(wsConnect, 1500);
+  };
+  ws.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === 'output') outputCbs.get(ev.tab_id)?.(ev.data);
+    else if (ev.type === 'exit') exitCbs.get(ev.tab_id)?.(ev.code);
+  };
+}
+
+function wsSend(msg) {
+  if (ws?.readyState === 1) ws.send(JSON.stringify(msg));
+}
+
+// ── Tabs ───────────────────────────────────────────────────────────────────
+
+const tabs = new Map(); // tabId → { term, fit, pane }
+let activeId = null;
+let tabN = 0;
+
+function makeTerminal(tabId) {
+  const pane = document.createElement('div');
+  pane.className = 'term-pane';
+  pane.dataset.tab = tabId;
+  document.getElementById('terminal-container').appendChild(pane);
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontFamily: 'Monaco, Menlo, "Cascadia Code", "Ubuntu Mono", monospace',
+    fontSize: 13,
+    lineHeight: 1.4,
+    theme: {
+      background: '#0f1117', foreground: '#e2e8f0',
+      cursor: '#7dd3a8', cursorAccent: '#0f1117',
+      selectionBackground: 'rgba(125,211,168,0.2)',
+      black: '#1e2535',    red: '#f87171',    green: '#4ade80',   yellow: '#fbbf24',
+      blue: '#60a5fa',     magenta: '#c084fc', cyan: '#34d399',   white: '#cbd5e1',
+      brightBlack: '#475569', brightRed: '#fc8181', brightGreen: '#6ee7b7',
+      brightYellow: '#fcd34d', brightBlue: '#93c5fd', brightMagenta: '#d8b4fe',
+      brightCyan: '#6ee7b7', brightWhite: '#f1f5f9',
+    },
+  });
+
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon());
+  term.open(pane);
+  fit.fit();
+
+  // Input → PTY (raw passthrough)
+  term.onData((data) => wsSend({ type: 'write', tab_id: tabId, data }));
+
+  // Resize — clamp + debounce to prevent runaway loop
+  let lastCols = 0, lastRows = 0, resizeTimer = 0;
+  term.onResize(({ cols, rows }) => {
+    const c = Math.min(Math.max(cols, 10), 500);
+    const r = Math.min(Math.max(rows, 2), 300);
+    if (c === lastCols && r === lastRows) return;
+    lastCols = c; lastRows = r;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => wsSend({ type: 'resize', tab_id: tabId, cols: c, rows: r }), 50);
+  });
+
+  outputCbs.set(tabId, (data) => term.write(data));
+  exitCbs.set(tabId, (code) => term.writeln(`\r\n\x1b[31mShell exited (${code})\x1b[0m`));
+
+  // Open session
+  wsSend({ type: 'write', tab_id: tabId, data: '' });
+
+  tabs.set(tabId, { term, fit, pane });
+  return { term, fit, pane };
+}
+
+function addTab() {
+  tabN++;
+  const id = `tab-${Date.now()}`;
+  makeTerminal(id);
+  addTabToSidebar(id, `Terminal ${tabN}`);
+  switchTo(id);
+}
+
+function switchTo(id) {
+  activeId = id;
+  // Update panes
+  document.querySelectorAll('.term-pane').forEach((p) => p.classList.remove('active'));
+  const pane = tabs.get(id)?.pane;
+  if (pane) pane.classList.add('active');
+  // Update sidebar
+  document.querySelectorAll('.tab-item').forEach((el) => {
+    el.classList.toggle('active', el.dataset.tab === id);
+  });
+  // Focus + refit
+  const { term, fit } = tabs.get(id) ?? {};
+  if (term && fit) {
+    setTimeout(() => { try { fit.fit(); term.focus(); } catch {} }, 30);
+  }
+}
+
+function addTabToSidebar(id, label) {
+  const el = document.createElement('div');
+  el.className = 'tab-item';
+  el.dataset.tab = id;
+  el.innerHTML = `<span class="tab-dot"></span><span>${label}</span>`;
+  el.onclick = () => switchTo(id);
+  document.getElementById('tab-list').appendChild(el);
+}
+
+// ── Window resize ──────────────────────────────────────────────────────────
+
+let winRaf = 0;
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(winRaf);
+  winRaf = requestAnimationFrame(() => {
+    const { fit } = tabs.get(activeId) ?? {};
+    try { fit?.fit(); } catch {}
+  });
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────
+
+wsConnect();
+
+// First tab
+tabN = 1;
+const firstId = 'tab-1';
+makeTerminal(firstId);
+addTabToSidebar(firstId, 'Terminal 1');
+switchTo(firstId);
+
+document.getElementById('add-tab').onclick = addTab;
+
+// Keyboard: Cmd+T new tab, Cmd+1-9 switch
+window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 't') { e.preventDefault(); addTab(); }
+  const n = parseInt(e.key);
+  if ((e.metaKey || e.ctrlKey) && n >= 1 && n <= 9) {
+    e.preventDefault();
+    const ids = [...tabs.keys()];
+    const target = n === 9 ? ids[ids.length - 1] : ids[n - 1];
+    if (target) switchTo(target);
+  }
+});
+</script>
+</body>
+</html>
