@@ -1,0 +1,294 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+@custom-variant dracula (&:is(.dracula *));
+
+@theme inline {
+  --font-display: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-paper: var(--paper);
+  --color-line: var(--line);
+  --color-signal: var(--signal);
+  --color-signal-soft: var(--signal-soft);
+  --color-alarm: var(--alarm);
+  --color-amber: var(--amber);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ring-offset-background: var(--background);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+/* ── Light theme ──────────────────────────────────────────── */
+:root {
+  --radius: 0.625rem;
+
+  --paper:           oklch(0.974 0.002 264);
+  --line:            oklch(0.913 0.006 264);
+  --signal:          oklch(0.585 0.192 269);   /* indigo */
+  --signal-soft:     oklch(0.940 0.038 269);
+  --alarm:           oklch(0.62 0.205 25);
+  --amber:           oklch(0.77 0.155 70);
+
+  --background:      oklch(0.974 0.002 264);
+  --foreground:      oklch(0.155 0.010 265);
+  --card:            oklch(1 0 0);
+  --card-foreground: oklch(0.155 0.010 265);
+  --popover:         oklch(1 0 0);
+  --popover-foreground: oklch(0.155 0.010 265);
+  --primary:         oklch(0.585 0.192 269);
+  --primary-foreground: oklch(0.98 0.004 264);
+  --secondary:       oklch(0.952 0.006 264);
+  --secondary-foreground: oklch(0.155 0.010 265);
+  --muted:           oklch(0.952 0.006 264);
+  --muted-foreground: oklch(0.535 0.022 264);
+  --accent:          oklch(0.940 0.038 269);
+  --accent-foreground: oklch(0.485 0.15 269);
+  --destructive:     oklch(0.62 0.205 25);
+  --destructive-foreground: oklch(0.98 0.004 264);
+  --border:          oklch(0.913 0.006 264);
+  --input:           oklch(0.913 0.006 264);
+  --ring:            oklch(0.585 0.192 269);
+
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+  --sidebar: oklch(0.966 0.004 264);
+  --sidebar-foreground: oklch(0.155 0.010 265);
+  --sidebar-primary: oklch(0.585 0.192 269);
+  --sidebar-primary-foreground: oklch(0.98 0.004 264);
+  --sidebar-accent: oklch(0.940 0.038 269);
+  --sidebar-accent-foreground: oklch(0.485 0.15 269);
+  --sidebar-border: oklch(0.913 0.006 264);
+  --sidebar-ring: oklch(0.585 0.192 269);
+}
+
+/* ── Dark theme ───────────────────────────────────────────── */
+.dark {
+  --paper:           oklch(0.130 0.012 270);
+  --line:            oklch(1 0 0 / 0.08);
+  --signal:          oklch(0.638 0.185 269);
+  --signal-soft:     oklch(0.175 0.035 269);
+  --alarm:           oklch(0.67 0.2 25);
+  --amber:           oklch(0.79 0.15 70);
+
+  --background:      oklch(0.130 0.012 270);
+  --foreground:      oklch(0.952 0.006 264);
+  --card:            oklch(0.168 0.014 270);
+  --card-foreground: oklch(0.952 0.006 264);
+  --popover:         oklch(0.168 0.014 270);
+  --popover-foreground: oklch(0.952 0.006 264);
+  --primary:         oklch(0.638 0.185 269);
+  --primary-foreground: oklch(0.130 0.012 270);
+  --secondary:       oklch(0.205 0.016 270);
+  --secondary-foreground: oklch(0.952 0.006 264);
+  --muted:           oklch(0.205 0.016 270);
+  --muted-foreground: oklch(0.495 0.030 268);
+  --accent:          oklch(0.205 0.016 270);
+  --accent-foreground: oklch(0.638 0.185 269);
+  --destructive:     oklch(0.67 0.2 25);
+  --destructive-foreground: oklch(0.952 0.006 264);
+  --border:          oklch(1 0 0 / 0.08);
+  --input:           oklch(1 0 0 / 0.10);
+  --ring:            oklch(0.638 0.185 269);
+
+  --chart-1: oklch(0.488 0.243 264.376);
+  --chart-2: oklch(0.696 0.17 162.48);
+  --chart-3: oklch(0.769 0.188 70.08);
+  --chart-4: oklch(0.627 0.265 303.9);
+  --chart-5: oklch(0.645 0.246 16.439);
+  --sidebar: oklch(0.150 0.013 270);
+  --sidebar-foreground: oklch(0.952 0.006 264);
+  --sidebar-primary: oklch(0.638 0.185 269);
+  --sidebar-primary-foreground: oklch(0.130 0.012 270);
+  --sidebar-accent: oklch(0.205 0.016 270);
+  --sidebar-accent-foreground: oklch(0.638 0.185 269);
+  --sidebar-border: oklch(1 0 0 / 0.08);
+  --sidebar-ring: oklch(0.638 0.185 269);
+}
+
+/* ── Dracula theme ────────────────────────────────────────── */
+.dracula {
+  --paper:              oklch(0.215 0.024 275);
+  --line:               oklch(0.330 0.030 275);
+  --signal:             oklch(0.762 0.207 300);
+  --signal-soft:        oklch(0.215 0.045 300);
+  --alarm:              oklch(0.640 0.220 25);
+  --amber:              oklch(0.790 0.150 65);
+  --background:         oklch(0.215 0.024 275);
+  --foreground:         oklch(0.970 0.005 255);
+  --card:               oklch(0.265 0.027 275);
+  --card-foreground:    oklch(0.970 0.005 255);
+  --popover:            oklch(0.265 0.027 275);
+  --popover-foreground: oklch(0.970 0.005 255);
+  --primary:            oklch(0.762 0.207 300);
+  --primary-foreground: oklch(0.215 0.024 275);
+  --secondary:          oklch(0.295 0.030 275);
+  --secondary-foreground: oklch(0.970 0.005 255);
+  --muted:              oklch(0.295 0.030 275);
+  --muted-foreground:   oklch(0.540 0.070 258);
+  --accent:             oklch(0.295 0.030 275);
+  --accent-foreground:  oklch(0.762 0.207 300);
+  --destructive:        oklch(0.640 0.220 25);
+  --destructive-foreground: oklch(0.970 0.005 255);
+  --border:             oklch(0.330 0.030 275);
+  --input:              oklch(0.330 0.030 275);
+  --ring:               oklch(0.762 0.207 300);
+  /* sidebar tokens — must be set explicitly or light values bleed through */
+  --sidebar:            oklch(0.185 0.022 275);
+  --sidebar-foreground: oklch(0.970 0.005 255);
+  --sidebar-primary:    oklch(0.762 0.207 300);
+  --sidebar-primary-foreground: oklch(0.215 0.024 275);
+  --sidebar-accent:     oklch(0.295 0.030 275);
+  --sidebar-accent-foreground: oklch(0.762 0.207 300);
+  --sidebar-border:     oklch(0.330 0.030 275);
+  --sidebar-ring:       oklch(0.762 0.207 300);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+  }
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: var(--signal-soft);
+    color: var(--accent-foreground);
+  }
+  :focus-visible {
+    outline: 2px solid var(--signal);
+    outline-offset: 2px;
+  }
+}
+
+@utility spine-node {
+  position: relative;
+  &::before {
+    content: "";
+    position: absolute;
+    left: -1.6875rem;
+    top: 0.55rem;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: currentColor;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@utility rise {
+  animation: rise 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes caret {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0; }
+}
+
+@utility caret-blink {
+  animation: caret 1.1s steps(1) infinite;
+}
+
+/* xterm transparency: override built-in opaque canvas background */
+.xterm-transparent .xterm,
+.xterm-transparent .xterm-screen,
+.xterm-transparent .xterm-screen canvas {
+  background: transparent !important;
+}
+.xterm-transparent .xterm-viewport {
+  background: transparent !important;
+  scrollbar-color: oklch(0.5 0 0 / 0.25) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* highlight.js — cool 3-hue theme: blue / violet / teal */
+.hljs                                          { background: transparent; color: var(--foreground); }
+.hljs-comment, .hljs-quote                     { color: var(--muted-foreground); font-style: italic; }
+
+/* keywords, control flow → signal blue */
+.hljs-keyword, .hljs-selector-tag,
+.hljs-built_in, .hljs-name, .hljs-tag,
+.hljs-title, .hljs-section                     { color: var(--signal); }
+
+/* strings, attributes → soft violet (same hue family as signal, slightly warmer) */
+.hljs-string, .hljs-attribute,
+.hljs-template-tag, .hljs-template-variable,
+.hljs-addition, .hljs-attr                     { color: oklch(0.68 0.12 310); }
+
+/* numbers, literals, symbols → desaturated teal */
+.hljs-number, .hljs-literal, .hljs-regexp,
+.hljs-symbol, .hljs-bullet, .hljs-variable,
+.hljs-selector-id, .hljs-selector-class        { color: oklch(0.64 0.09 195); }
+
+.hljs-deletion, .hljs-meta                     { color: var(--alarm); }
+.hljs-type, .hljs-doctag                       { color: var(--foreground); opacity: 0.7; }
+.hljs-link                                     { text-decoration: underline; color: var(--signal); }
+.hljs-emphasis                                 { font-style: italic; }
+.hljs-strong                                   { font-weight: 600; }

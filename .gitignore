@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+app/node_modules/
+frontend/node_modules/
+ui/node_modules/
+
+# Build outputs
+app/build/
+target/
+dist/
+
+# Binary blobs
+app/allow_magnification.dylib
+
+# Electrobun build caches
+app/.cottontail-tmp/
+app/.hutch/
+app/build/
+
+# Shell integration personal data
+shell-integration/.zsh_history
+shell-integration/.zcompdump
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Playwright
+.playwright-mcp/
+
+# Serena
+.serena/

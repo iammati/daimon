@@ -1,0 +1,15 @@
+{
+  "name": "daimon2",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "electrobun run",
+    "dev": "electrobun dev",
+    "build": "electrobun build"
+  },
+  "dependencies": {
+    "electrobun": "2.0.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4"
+  }
+}
