@@ -3,10 +3,7 @@ resolver = "2"
 members = [
     "crates/pty-daemon",
     "crates/shell-parser",
-    "ghost-complete/crates/gc-buffer",
-    "ghost-complete/crates/gc-config",
-    "ghost-complete/crates/gc-jsrt",
-    "ghost-complete/crates/gc-suggest",
+    "crates/daimon-cli",
 ]
 
 [workspace.package]
