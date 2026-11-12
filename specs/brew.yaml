@@ -1,0 +1,65 @@
+name: brew
+description: Homebrew package manager
+
+subcommands:
+  - name: install
+    args:
+      - kind: string
+    flags:
+      - name: --cask
+      - name: --formula
+      - name: --HEAD
+  - name: uninstall
+    aliases: [remove, rm]
+    args:
+      - kind: string
+    flags:
+      - name: --cask
+  - name: upgrade
+    args:
+      - kind: string
+    flags:
+      - name: --greedy
+  - name: update
+  - name: search
+    args:
+      - kind: string
+  - name: info
+    args:
+      - kind: string
+    flags:
+      - name: --cask
+  - name: list
+    flags:
+      - name: --cask
+      - name: --formula
+      - name: --versions
+  - name: outdated
+    flags:
+      - name: --cask
+      - name: --formula
+  - name: doctor
+  - name: cleanup
+    flags:
+      - name: --prune
+        arg: {kind: string}
+      - name: --dry-run
+        short: -n
+  - name: tap
+    args:
+      - kind: string
+  - name: untap
+    args:
+      - kind: string
+  - name: services
+    subcommands:
+      - name: list
+      - name: start
+        args:
+          - kind: string
+      - name: stop
+        args:
+          - kind: string
+      - name: restart
+        args:
+          - kind: string

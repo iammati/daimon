@@ -4,6 +4,7 @@ members = [
     "crates/pty-daemon",
     "crates/shell-parser",
     "crates/daimon-cli",
+    "crates/daimon-complete",
 ]
 
 [workspace.package]

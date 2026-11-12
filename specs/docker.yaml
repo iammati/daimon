@@ -1,0 +1,96 @@
+name: docker
+description: Container runtime
+
+subcommands:
+  - name: run
+    description: Run a container
+    flags:
+      - name: --interactive
+        short: -i
+      - name: --tty
+        short: -t
+      - name: --detach
+        short: -d
+      - name: --rm
+        description: Remove container on exit
+      - name: --name
+        arg: {kind: string}
+      - name: --env
+        short: -e
+        arg: {kind: string}
+      - name: --volume
+        short: -v
+        arg: {kind: string}
+      - name: --publish
+        short: -p
+        arg: {kind: string}
+      - name: --network
+        arg: {kind: string}
+  - name: build
+    flags:
+      - name: --tag
+        short: -t
+        arg: {kind: string}
+      - name: --file
+        short: -f
+        arg: {kind: file}
+      - name: --no-cache
+      - name: --platform
+        arg: {kind: string}
+  - name: ps
+    flags:
+      - name: --all
+        short: -a
+  - name: images
+    flags:
+      - name: --all
+        short: -a
+  - name: pull
+    args:
+      - kind: string
+  - name: push
+    args:
+      - kind: string
+  - name: exec
+    flags:
+      - name: --interactive
+        short: -i
+      - name: --tty
+        short: -t
+  - name: logs
+    flags:
+      - name: --follow
+        short: -f
+      - name: --tail
+        arg: {kind: string}
+  - name: stop
+  - name: start
+  - name: restart
+  - name: rm
+    flags:
+      - name: --force
+        short: -f
+  - name: rmi
+    flags:
+      - name: --force
+        short: -f
+  - name: inspect
+  - name: compose
+    subcommands:
+      - name: up
+        flags:
+          - name: --detach
+            short: -d
+          - name: --build
+      - name: down
+        flags:
+          - name: --volumes
+            short: -v
+      - name: logs
+        flags:
+          - name: --follow
+            short: -f
+      - name: build
+      - name: ps
+      - name: pull
+      - name: restart

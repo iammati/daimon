@@ -1,0 +1,101 @@
+name: kubectl
+description: Kubernetes CLI
+
+subcommands:
+  - name: get
+    description: Display resources
+    args:
+      - kind: choice
+        choices: [pods,deployments,services,nodes,namespaces,configmaps,secrets,ingresses,persistentvolumeclaims,statefulsets,daemonsets,replicasets,jobs,cronjobs,all]
+    flags:
+      - name: --namespace
+        short: -n
+        arg: {kind: string}
+      - name: --all-namespaces
+        short: -A
+      - name: --output
+        short: -o
+        arg: {kind: choice, choices: [json,yaml,wide,name]}
+      - name: --watch
+        short: -w
+      - name: --selector
+        short: -l
+        arg: {kind: string}
+  - name: describe
+    args:
+      - kind: choice
+        choices: [pod,deployment,service,node,namespace,configmap,secret,ingress]
+  - name: apply
+    flags:
+      - name: --filename
+        short: -f
+        arg: {kind: file}
+      - name: --recursive
+        short: -R
+      - name: --dry-run
+        arg: {kind: choice, choices: [client,server,none]}
+  - name: delete
+    args:
+      - kind: choice
+        choices: [pod,deployment,service,configmap,secret,ingress]
+    flags:
+      - name: --filename
+        short: -f
+        arg: {kind: file}
+      - name: --force
+      - name: --namespace
+        short: -n
+        arg: {kind: string}
+  - name: logs
+    flags:
+      - name: --follow
+        short: -f
+      - name: --tail
+        arg: {kind: string}
+      - name: --namespace
+        short: -n
+        arg: {kind: string}
+      - name: --container
+        short: -c
+        arg: {kind: string}
+  - name: exec
+    flags:
+      - name: --stdin
+        short: -i
+      - name: --tty
+        short: -t
+      - name: --namespace
+        short: -n
+        arg: {kind: string}
+      - name: --container
+        short: -c
+        arg: {kind: string}
+  - name: config
+    subcommands:
+      - name: get-contexts
+      - name: use-context
+      - name: current-context
+      - name: set-context
+      - name: view
+  - name: rollout
+    subcommands:
+      - name: status
+      - name: history
+      - name: undo
+      - name: restart
+  - name: scale
+    flags:
+      - name: --replicas
+        arg: {kind: string}
+  - name: port-forward
+    flags:
+      - name: --namespace
+        short: -n
+        arg: {kind: string}
+  - name: top
+    subcommands:
+      - name: pods
+      - name: nodes
+  - name: namespace
+    args:
+      - kind: string

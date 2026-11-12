@@ -1,0 +1,83 @@
+name: cargo
+description: Rust package manager
+
+subcommands:
+  - name: build
+    flags:
+      - name: --release
+      - name: --package
+        short: -p
+        arg: {kind: string}
+      - name: --all
+      - name: --features
+        arg: {kind: string}
+      - name: --no-default-features
+      - name: --target
+        arg: {kind: string}
+  - name: run
+    flags:
+      - name: --release
+      - name: --package
+        short: -p
+        arg: {kind: string}
+      - name: --bin
+        arg: {kind: string}
+  - name: test
+    flags:
+      - name: --release
+      - name: --package
+        short: -p
+        arg: {kind: string}
+      - name: --no-run
+      - name: --nocapture
+  - name: check
+    flags:
+      - name: --package
+        short: -p
+        arg: {kind: string}
+      - name: --all
+  - name: clippy
+    flags:
+      - name: --all
+      - name: --fix
+  - name: fmt
+    flags:
+      - name: --check
+      - name: --all
+  - name: add
+    args:
+      - kind: string
+    flags:
+      - name: --dev
+      - name: --features
+        arg: {kind: string}
+  - name: remove
+    args:
+      - kind: string
+  - name: update
+  - name: clean
+  - name: doc
+    flags:
+      - name: --open
+      - name: --no-deps
+  - name: publish
+    flags:
+      - name: --dry-run
+  - name: install
+    args:
+      - kind: string
+    flags:
+      - name: --path
+        arg: {kind: dir}
+      - name: --bin
+        arg: {kind: string}
+  - name: new
+    args:
+      - kind: dir
+    flags:
+      - name: --lib
+      - name: --bin
+  - name: init
+    flags:
+      - name: --lib
+      - name: --bin
