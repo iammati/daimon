@@ -9,8 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 shell-parser = { path = "../shell-parser" }
-gc-suggest = { path = "../../ghost-complete/crates/gc-suggest" }
-gc-buffer  = { path = "../../ghost-complete/crates/gc-buffer" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "6"
 tokio = { version = "1", features = ["full"] }
