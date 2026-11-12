@@ -1,0 +1,60 @@
+name: bun
+description: JavaScript runtime and package manager
+
+subcommands:
+  - name: install
+    aliases: [i]
+    flags:
+      - name: --frozen-lockfile
+      - name: --production
+      - name: --dev
+        short: -d
+      - name: --peer
+  - name: add
+    aliases: [a]
+    args:
+      - kind: string
+    flags:
+      - name: --dev
+        short: -d
+      - name: --exact
+        short: -E
+      - name: --global
+        short: -g
+  - name: remove
+    aliases: [rm]
+    args:
+      - kind: string
+  - name: run
+    args:
+      - kind: string
+  - name: build
+    flags:
+      - name: --outdir
+        arg: {kind: dir}
+      - name: --minify
+      - name: --sourcemap
+        arg: {kind: choice, choices: [none,inline,external]}
+      - name: --target
+        arg: {kind: choice, choices: [browser,bun,node]}
+  - name: test
+    flags:
+      - name: --watch
+      - name: --coverage
+      - name: --timeout
+        arg: {kind: string}
+  - name: x
+    description: Execute a package binary
+    args:
+      - kind: string
+  - name: update
+    args:
+      - kind: string
+  - name: pm
+    subcommands:
+      - name: ls
+      - name: cache
+      - name: hash
+      - name: hash-print
+  - name: repl
+  - name: upgrade

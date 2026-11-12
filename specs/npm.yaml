@@ -1,0 +1,53 @@
+name: npm
+description: Node package manager
+
+subcommands:
+  - name: install
+    aliases: [i, ci]
+    flags:
+      - name: --save-dev
+        short: -D
+      - name: --save-exact
+        short: -E
+      - name: --global
+        short: -g
+      - name: --production
+      - name: --legacy-peer-deps
+  - name: run
+    args:
+      - kind: string
+  - name: test
+  - name: build
+  - name: start
+  - name: publish
+    flags:
+      - name: --dry-run
+      - name: --access
+        arg: {kind: choice, choices: [public,restricted]}
+  - name: update
+    args:
+      - kind: string
+  - name: uninstall
+    aliases: [rm, remove]
+    args:
+      - kind: string
+    flags:
+      - name: --global
+        short: -g
+  - name: outdated
+  - name: audit
+    flags:
+      - name: --fix
+  - name: ls
+    flags:
+      - name: --depth
+        arg: {kind: string}
+      - name: --global
+        short: -g
+  - name: exec
+    args:
+      - kind: string
+  - name: init
+    flags:
+      - name: --yes
+        short: -y

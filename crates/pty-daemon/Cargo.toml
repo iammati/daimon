@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 shell-parser = { path = "../shell-parser" }
+daimon-complete = { path = "../daimon-complete" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "6"
 tokio = { version = "1", features = ["full"] }

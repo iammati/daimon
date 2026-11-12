@@ -1,0 +1,40 @@
+name: jq
+description: JSON processor
+
+flags:
+  - name: --compact-output
+    short: -c
+  - name: --raw-output
+    short: -r
+    description: Output strings without quotes
+  - name: --raw-input
+    short: -R
+  - name: --slurp
+    short: -s
+    description: Read all input into array
+  - name: --null-input
+    short: -n
+  - name: --monochrome-output
+    short: -M
+  - name: --tab
+  - name: --indent
+    arg: {kind: string}
+  - name: --arg
+    arg: {kind: string}
+  - name: --argjson
+    arg: {kind: string}
+  - name: --slurpfile
+    arg: {kind: file}
+  - name: --rawfile
+    arg: {kind: file}
+  - name: --args
+  - name: --join-output
+    short: -j
+  - name: --exit-status
+    short: -e
+
+args:
+  - name: filter
+    kind: string
+  - name: files
+    kind: rest

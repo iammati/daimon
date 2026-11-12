@@ -1,0 +1,37 @@
+name: ssh
+description: Secure shell client
+
+flags:
+  - name: -p
+    description: Port
+    arg: {kind: string}
+  - name: -i
+    description: Identity file
+    arg: {kind: file}
+  - name: -L
+    description: Local port forward
+    arg: {kind: string}
+  - name: -R
+    description: Remote port forward
+    arg: {kind: string}
+  - name: -D
+    description: Dynamic port forward
+    arg: {kind: string}
+  - name: -N
+    description: No remote command
+  - name: -T
+    description: Disable pseudo-terminal
+  - name: -A
+    description: Forward agent
+  - name: -v
+    description: Verbose
+  - name: -o
+    description: Option
+    arg: {kind: string}
+  - name: -J
+    description: Jump host
+    arg: {kind: string}
+
+args:
+  - name: destination
+    kind: string

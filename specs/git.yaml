@@ -1,0 +1,146 @@
+name: git
+description: Version control
+
+subcommands:
+  - name: add
+    description: Stage files
+    args:
+      - kind: file
+  - name: commit
+    description: Record changes
+    flags:
+      - name: --message
+        short: -m
+        description: Commit message
+        arg: {kind: string}
+      - name: --amend
+        description: Amend last commit
+      - name: --no-edit
+        description: Reuse last commit message
+  - name: push
+    description: Upload to remote
+    flags:
+      - name: --force
+        short: -f
+      - name: --force-with-lease
+      - name: --set-upstream
+        short: -u
+    args:
+      - kind: git_remote
+      - kind: git_branch
+  - name: pull
+    description: Fetch and merge
+    args:
+      - kind: git_remote
+      - kind: git_branch
+  - name: fetch
+    args:
+      - kind: git_remote
+  - name: checkout
+    description: Switch branch or restore files
+    aliases: [co]
+    flags:
+      - name: --branch
+        short: -b
+        description: Create new branch
+        arg: {kind: string}
+    args:
+      - kind: git_branch
+  - name: switch
+    description: Switch branches
+    flags:
+      - name: --create
+        short: -c
+        arg: {kind: string}
+    args:
+      - kind: git_branch
+  - name: branch
+    description: List or manage branches
+    flags:
+      - name: --delete
+        short: -d
+        arg: {kind: git_branch}
+      - name: --move
+        short: -m
+      - name: --all
+        short: -a
+    args:
+      - kind: git_branch
+  - name: merge
+    args:
+      - kind: git_branch
+  - name: rebase
+    args:
+      - kind: git_branch
+  - name: cherry-pick
+    args:
+      - kind: git_branch
+  - name: tag
+    args:
+      - kind: git_tag
+  - name: log
+    flags:
+      - name: --oneline
+      - name: --graph
+      - name: --all
+      - name: --decorate
+      - name: --follow
+      - name: --stat
+      - name: --patch
+        short: -p
+  - name: diff
+    flags:
+      - name: --staged
+      - name: --stat
+      - name: --name-only
+  - name: status
+    flags:
+      - name: --short
+        short: -s
+      - name: --branch
+        short: -b
+  - name: stash
+    subcommands:
+      - name: push
+      - name: pop
+      - name: list
+      - name: drop
+      - name: apply
+  - name: remote
+    subcommands:
+      - name: add
+        args:
+          - kind: string
+          - kind: string
+      - name: remove
+        args:
+          - kind: git_remote
+      - name: rename
+      - name: -v
+  - name: clone
+    args:
+      - kind: string
+      - kind: dir
+  - name: init
+    args:
+      - kind: dir
+  - name: reset
+    flags:
+      - name: --soft
+      - name: --mixed
+      - name: --hard
+  - name: restore
+    flags:
+      - name: --staged
+        short: -S
+    args:
+      - kind: file
+  - name: show
+    args:
+      - kind: git_tag
+
+flags:
+  - name: --version
+    short: -v
+  - name: --help
+    short: -h

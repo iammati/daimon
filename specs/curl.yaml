@@ -1,0 +1,59 @@
+name: curl
+description: Transfer data with URLs
+
+flags:
+  - name: --request
+    short: -X
+    description: HTTP method
+    arg: {kind: choice, choices: [GET,POST,PUT,PATCH,DELETE,HEAD,OPTIONS]}
+  - name: --header
+    short: -H
+    description: Request header
+    arg: {kind: string}
+  - name: --data
+    short: -d
+    description: Request body
+    arg: {kind: string}
+  - name: --data-raw
+    arg: {kind: string}
+  - name: --output
+    short: -o
+    arg: {kind: file}
+  - name: --silent
+    short: -s
+  - name: --verbose
+    short: -v
+  - name: --include
+    short: -i
+    description: Include response headers
+  - name: --location
+    short: -L
+    description: Follow redirects
+  - name: --user
+    short: -u
+    arg: {kind: string}
+  - name: --cookie
+    short: -b
+    arg: {kind: string}
+  - name: --form
+    short: -F
+    arg: {kind: string}
+  - name: --upload-file
+    short: -T
+    arg: {kind: file}
+  - name: --compressed
+  - name: --max-time
+    short: -m
+    arg: {kind: string}
+  - name: --retry
+    arg: {kind: string}
+  - name: --insecure
+    short: -k
+  - name: --cert
+    arg: {kind: file}
+  - name: --key
+    arg: {kind: file}
+
+args:
+  - name: url
+    kind: string

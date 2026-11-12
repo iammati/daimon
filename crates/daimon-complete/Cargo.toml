@@ -1,0 +1,14 @@
+[package]
+name = "daimon-complete"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+serde_yaml = "0.9"
+dirs = "6"
+git2 = { version = "0.20", default-features = false }
