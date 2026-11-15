@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { createPortal } from "react-dom";
 import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
+import { Keys } from "./Kbd";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, STREAMING_INTERACTIVE_RE, abandonRun } from "@/lib/daimon/shell";
@@ -594,6 +595,21 @@ type OpenPager = { pane: string | null };
 /** Open pagers in open order; the last one per pane owns the keyboard. */
 const openPagers: OpenPager[] = [];
 
+/** One pager shortcut hint: keycap combos separated by "/", then a label. */
+function PagerHint({ keys, label, className = "" }: { keys: string[]; label: string; className?: string }) {
+  return (
+    <span className={`flex items-center gap-1.5 ${className}`}>
+      {keys.map((k, i) => (
+        <React.Fragment key={k}>
+          {i > 0 && <span className="text-muted-foreground/40">/</span>}
+          <Keys combo={k} size="xs" />
+        </React.Fragment>
+      ))}
+      <span>{label}</span>
+    </span>
+  );
+}
+
 function FullscreenPager({
   title,
   isLast,
@@ -657,6 +673,12 @@ function FullscreenPager({
       if (!inSearch && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
 
       if (e.key === "Tab") { e.preventDefault(); return; }
+      // Ctrl/Cmd+Shift+A: unambiguous with select-all (Ctrl/Cmd+A), so it works from the search field too.
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        onToggleAll();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         e.preventDefault();
         if (inSearch) { searchRef.current?.blur(); return; }
@@ -667,11 +689,6 @@ function FullscreenPager({
       if (e.key === "q") {
         e.preventDefault();
         setFullscreen(false);
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === "a") {
-        e.preventDefault();
-        onToggleAll();
         return;
       }
       if (e.key === "/" || e.key === "f") {
@@ -718,19 +735,15 @@ function FullscreenPager({
             className="w-48 rounded border border-line/40 bg-card px-2 py-0.5 font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground/40 focus:border-signal/50"
           />
         </div>
-        <span className="ml-auto flex gap-4 text-[11px] text-muted-foreground/40">
-          <span>↑↓ / j k navigate</span>
-          <span>← → / h l expand</span>
-          <span>enter toggle</span>
-          <span className={allCollapsed ? "text-signal/70" : ""}>⌘A {allCollapsed ? "expand all" : "collapse all"}</span>
-          <span className="text-muted-foreground/60">q exit</span>
+        <span className="ml-auto flex items-center gap-4 text-[11px] text-muted-foreground/60">
+          <PagerHint keys={["↑↓", "jk"]} label="navigate" />
+          <PagerHint keys={["←→", "hl"]} label="expand" />
+          <PagerHint keys={["Enter"]} label="toggle" />
+          <PagerHint keys={["⌘⇧A"]} label={allCollapsed ? "expand all" : "collapse all"} className={allCollapsed ? "text-signal/80" : ""} />
+          <PagerHint keys={["q", "⌘C"]} label="exit" />
         </span>
       </div>
       {typeof children === "function" ? (children as (search: string) => React.ReactNode)(search) : children}
-      <div className="shrink-0 border-t border-border px-4 py-1.5 flex items-center gap-4 text-[11px] text-muted-foreground/40">
-        <span>q / ctrl+c — exit</span>
-        <span className={allCollapsed ? "text-signal/70 font-medium" : ""}>⌘A — {allCollapsed ? "expand all" : "collapse all"}</span>
-      </div>
     </div>,
     container
       )}

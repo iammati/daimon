@@ -244,6 +244,64 @@ function stripPromptLines(text: string): string {
   return text.split("\n").filter((l) => !PROMPT_RE.test(ANSI(l).trim())).join("\n").trim();
 }
 
+// ── Line-level terminal emulation ──────────────────────────────────────────
+// Progress output (git push/clone, curl, cargo, pip…) redraws one line in place
+// with \r, ESC[K and backspace. Replay those on a per-line cell grid so only the
+// final state of each line survives — and live updates overwrite instead of piling up.
+const LINE_CTRL_RE = /[\r\x08]|\x1b\[\d*[KGCD]/;
+const LINE_TOKEN_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[^[\]]|[\r\x08]|[\s\S]/gu;
+
+function renderTermLine(line: string): string {
+  if (!LINE_CTRL_RE.test(line)) return line;
+  type Cell = { ch: string; style: string; pre: string };
+  const cells: Cell[] = [];
+  let col = 0;
+  let style = "";   // accumulated SGR since last reset
+  let pre = "";     // non-SGR escapes (OSC 8 links etc.) carried onto the next cell
+  const blank = (): Cell => ({ ch: " ", style: "", pre: "" });
+  for (const m of line.matchAll(LINE_TOKEN_RE)) {
+    const t = m[0];
+    if (t === "\r") { col = 0; continue; }
+    if (t === "\x08") { col = Math.max(0, col - 1); continue; }
+    if (t.startsWith("\x1b[")) {
+      const final = t[t.length - 1]!;
+      const arg = t.slice(2, -1);
+      const n = parseInt(arg, 10);
+      if (final === "m") { style = arg === "" || arg === "0" ? "" : style + t; continue; }
+      if (final === "K") {
+        if (!arg || arg === "0") cells.length = Math.min(cells.length, col);
+        else if (arg === "1") for (let i = 0; i <= col && i < cells.length; i++) cells[i] = blank();
+        else if (arg === "2") cells.length = 0;
+        continue;
+      }
+      if (final === "G") { col = Math.max(0, (isNaN(n) ? 1 : n) - 1); continue; }
+      if (final === "C") { col += isNaN(n) ? 1 : n; continue; }
+      if (final === "D") { col = Math.max(0, col - (isNaN(n) ? 1 : n)); continue; }
+      pre += t; // other CSI: pass through untouched
+      continue;
+    }
+    if (t.startsWith("\x1b")) { pre += t; continue; }
+    while (cells.length < col) cells.push(blank());
+    cells[col] = { ch: t, style, pre };
+    pre = "";
+    col++;
+  }
+  let out = "";
+  let cur = "";
+  for (const c of cells) {
+    if (c.style !== cur) { out += "\x1b[0m" + c.style; cur = c.style; }
+    out += c.pre + c.ch;
+  }
+  if (cur) out += "\x1b[0m";
+  return out + pre;
+}
+
+/** Collapse in-place redraws so each logical line keeps only what a terminal would show. */
+export function normalizeTerminal(raw: string): string {
+  if (!LINE_CTRL_RE.test(raw)) return raw;
+  return raw.replace(/\r+\n/g, "\n").split("\n").map(renderTermLine).join("\n");
+}
+
 // OSC 1337 imgcat: ESC ] 1337 ; File=inline=1[;...] : <base64> BEL
 const OSC1337_RE = /\x1b\]1337;File=[^\x07\x1b]*:([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)/g;
 
@@ -260,7 +318,7 @@ function parse(rawText: string): Out[] {
     return [...imgOuts, ...rest];
   }
 
-  const cleaned = rawText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const cleaned = normalizeTerminal(rawText);
   if (hasColor(cleaned)) {
     const stripped = ANSI(cleaned).trim();
     if (!stripped) return [];

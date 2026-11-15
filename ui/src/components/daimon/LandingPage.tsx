@@ -196,6 +196,26 @@ export function LandingPage({ blocks, history = [], onCd, onRun, onOpenPalette }
     return () => window.removeEventListener("show-keys", handler);
   }, []);
 
+  // ⌘⇧↵ / Ctrl+Shift+Enter → "Continue here". Only bound while this start page is mounted,
+  // and only in the focused split pane. Capture phase so the composer never sees the Enter.
+  const sectionRef = useRef<HTMLElement>(null);
+  const resumeRef = useRef(resume);
+  resumeRef.current = resume;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" || !e.shiftKey || !(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const pane = sectionRef.current?.closest<HTMLElement>("[data-pane]");
+      if (pane?.dataset["paneFocused"] === "false") return;
+      const r = resumeRef.current;
+      if (!r) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onCd(r.cwd);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onCd]);
+
   const heroCwd = resume ? splitPath(formatCwd(resume.cwd)) : null;
   const sshHostList = sshHosts(history);
   const recentDirList = (() => {
@@ -209,7 +229,7 @@ export function LandingPage({ blocks, history = [], onCd, onRun, onOpenPalette }
   })();
 
   return (
-    <section className="w-full px-8 py-10 max-w-5xl">
+    <section ref={sectionRef} className="w-full px-8 py-10 max-w-5xl">
 
       {/* ── Hero ── */}
       <div className="mb-14">
@@ -260,6 +280,7 @@ export function LandingPage({ blocks, history = [], onCd, onRun, onOpenPalette }
         >
           <CornerDownLeftIcon className="size-3.5 text-signal" />
           Continue here
+          <Keys combo="⌘⇧↵" size="xs" className="ml-2" />
         </button>
       </div>
 
