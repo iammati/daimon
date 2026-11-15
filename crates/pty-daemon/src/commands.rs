@@ -17,23 +17,58 @@ fn run(cmd: &str, args: &[&str], cwd: Option<&str>) -> Result<String, String> {
     }
 }
 
+/// Per-file `+added -removed` line counts from `git diff --numstat [extra]`.
+/// Binary files report `-` and are omitted. Renames are keyed by their new path.
+fn numstat_map(cwd: &str, extra: &[&str]) -> std::collections::HashMap<String, (u64, u64)> {
+    let mut args = vec!["--no-pager", "--no-optional-locks", "diff", "--numstat", "-M"];
+    args.extend_from_slice(extra);
+    let mut map = std::collections::HashMap::new();
+    if let Ok(raw) = run("git", &args, Some(cwd)) {
+        for line in raw.lines() {
+            let mut cols = line.splitn(3, '\t');
+            let (Some(a), Some(d), Some(path)) = (cols.next(), cols.next(), cols.next()) else { continue };
+            let (Ok(a), Ok(d)) = (a.parse::<u64>(), d.parse::<u64>()) else { continue };
+            map.insert(rename_target(path), (a, d));
+        }
+    }
+    map
+}
+
+/// `old => new` or `dir/{old => new}/file` → new path.
+fn rename_target(path: &str) -> String {
+    if let (Some(open), Some(close)) = (path.find('{'), path.find('}')) {
+        let inner = &path[open + 1..close];
+        if let Some((_, new)) = inner.split_once(" => ") {
+            let joined = format!("{}{}{}", &path[..open], new, &path[close + 1..]);
+            return joined.replace("//", "/");
+        }
+    }
+    match path.split_once(" => ") {
+        Some((_, new)) => new.to_string(),
+        None => path.to_string(),
+    }
+}
+
 pub fn git_status(cwd: &str) -> Value {
     match run("git", &["--no-pager", "status", "--porcelain=v1", "-b"], Some(cwd)) {
         Err(e) => json!({ "error": e }),
         Ok(raw) => {
             let mut branch = String::new();
+            let mut upstream: Option<String> = None;
             let mut ahead = 0i32;
             let mut behind = 0i32;
-            let mut staged: Vec<Value> = vec![];
-            let mut unstaged: Vec<Value> = vec![];
+            let mut staged: Vec<(String, String, Option<String>)> = vec![];
+            let mut unstaged: Vec<(String, String, Option<String>)> = vec![];
             let mut untracked: Vec<String> = vec![];
 
             for line in raw.lines() {
                 if let Some(rest) = line.strip_prefix("## ") {
-                    // ## main...origin/main [ahead 1, behind 2]
+                    // ## main...origin/main [ahead 1, behind 2]   |   ## No commits yet on main
+                    let rest = rest.strip_prefix("No commits yet on ").unwrap_or(rest);
                     let parts: Vec<&str> = rest.splitn(2, "...").collect();
-                    branch = parts[0].to_string();
+                    branch = parts[0].split(' ').next().unwrap_or("").to_string();
                     if let Some(info) = parts.get(1) {
+                        upstream = info.split(' ').next().map(|s| s.to_string()).filter(|s| !s.is_empty());
                         if let Some(a) = info.split("ahead ").nth(1) {
                             ahead = a.split([',', ']']).next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
                         }
@@ -43,18 +78,49 @@ pub fn git_status(cwd: &str) -> Value {
                     }
                 } else if line.len() >= 3 {
                     let xy = &line[..2];
-                    let path = line[3..].to_string();
+                    let raw_path = &line[3..];
                     if xy == "??" {
-                        untracked.push(path);
+                        untracked.push(raw_path.to_string());
                     } else {
+                        // Renames/copies: "old -> new"
+                        let (path, from) = match raw_path.split_once(" -> ") {
+                            Some((old, new)) => (new.to_string(), Some(old.to_string())),
+                            None => (raw_path.to_string(), None),
+                        };
                         let x = &xy[..1];
                         let y = &xy[1..];
-                        if x != " " && x != "?" { staged.push(json!({ "xy": x, "path": path })); }
-                        if y != " " && y != "?" { unstaged.push(json!({ "xy": y, "path": path })); }
+                        if x != " " && x != "?" { staged.push((x.to_string(), path.clone(), from.clone())); }
+                        if y != " " && y != "?" { unstaged.push((y.to_string(), path, None)); }
                     }
                 }
             }
-            json!({ "branch": branch, "ahead": ahead, "behind": behind, "staged": staged, "unstaged": unstaged, "untracked": untracked })
+
+            let staged_stats = if staged.is_empty() { Default::default() } else { numstat_map(cwd, &["--cached"]) };
+            let unstaged_stats = if unstaged.is_empty() { Default::default() } else { numstat_map(cwd, &[]) };
+            let to_json = |items: Vec<(String, String, Option<String>)>, stats: &std::collections::HashMap<String, (u64, u64)>| -> Vec<Value> {
+                items.into_iter().map(|(xy, path, from)| {
+                    let mut v = json!({ "xy": xy, "path": path });
+                    if let Some((a, d)) = stats.get(&path) { v["add"] = json!(a); v["del"] = json!(d); }
+                    if let Some(f) = from { v["from"] = json!(f); }
+                    v
+                }).collect()
+            };
+            let staged = to_json(staged, &staged_stats);
+            let unstaged = to_json(unstaged, &unstaged_stats);
+
+            // Line counts of tracked changes vs HEAD — same numbers the shell prompt hook reports,
+            // so the UI can refresh its status line without waiting for the next prompt.
+            let (mut added, mut removed) = (0u64, 0u64);
+            if !staged.is_empty() || !unstaged.is_empty() {
+                if let Ok(numstat) = run("git", &["--no-pager", "--no-optional-locks", "diff", "--numstat", "HEAD"], Some(cwd)) {
+                    for line in numstat.lines() {
+                        let mut cols = line.split('\t');
+                        added += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                        removed += cols.next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+                    }
+                }
+            }
+            json!({ "branch": branch, "upstream": upstream, "ahead": ahead, "behind": behind, "staged": staged, "unstaged": unstaged, "untracked": untracked, "added": added, "removed": removed })
         }
     }
 }

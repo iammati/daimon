@@ -8,7 +8,7 @@ import {
   SearchIcon,
 } from "lucide-react";
 import { Keys } from "./Kbd";
-import { GLASS_DEFAULT, GLASS_MIN_OPACITY, hasNativeBlur, loadGlass, nativeBlurLabel, saveGlass, type Glass } from "@/lib/daimon/appearance";
+import { GLASS_DEFAULT, GLASS_MIN_OPACITY, loadGlass, nativeBlurLabel, nativeBlurMode, saveGlass, type Glass } from "@/lib/daimon/appearance";
 import { shell } from "@/lib/daimon/rpc";
 
 type Theme = "light" | "dracula";
@@ -172,11 +172,13 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
       label: "Background blur",
       node: (
         <div className="flex items-center gap-2">
-          {hasNativeBlur() ? (
+          {nativeBlurMode() ? (
             <span
-              className="font-mono text-xs text-muted-foreground w-14 text-right"
-              title="Windows blurs the desktop behind the window in three steps: off, soft, frosted"
-            >{nativeBlurLabel(glass.blur)}</span>
+              className="font-mono text-xs text-muted-foreground w-14 text-right tabular-nums"
+              title={nativeBlurMode() === "variable"
+                ? "How strongly the desktop behind the window is blurred"
+                : "Windows blurs the desktop behind the window in three steps: off, soft, frosted"}
+            >{nativeBlurLabel(glass.blur, nativeBlurMode()!)}</span>
           ) : (
             <span className="font-mono text-xs text-muted-foreground w-9 text-right tabular-nums">{glass.blur}px</span>
           )}

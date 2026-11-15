@@ -118,7 +118,8 @@ function send(msg: object) {
 
 // ── shell API ────────────────────────────────────────────────────────────────
 
-type GitStatus = { branch: string; ahead: number; behind: number; staged: { xy: string; path: string }[]; unstaged: { xy: string; path: string }[]; untracked: string[] };
+type GitStatusFile = { xy: string; path: string; from?: string; add?: number; del?: number };
+type GitStatus = { branch: string; upstream?: string | null; ahead: number; behind: number; staged: GitStatusFile[]; unstaged: GitStatusFile[]; untracked: string[]; added?: number; removed?: number; error?: string };
 type LogEntry  = { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean };
 type CommitDetail = { files: { status: string; path: string; additions: number; deletions: number }[]; body: string };
 

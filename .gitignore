@@ -6,11 +6,9 @@ ui/node_modules/
 
 # Build outputs
 app/build/
+app/artifacts/
 target/
 dist/
-
-# Binary blobs
-app/allow_magnification.dylib
 
 # Electrobun build caches
 app/.cottontail-tmp/

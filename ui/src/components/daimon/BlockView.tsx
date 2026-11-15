@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useContext, createContext, useMemo, useCallback } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useContext, createContext, useMemo, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { createPortal } from "react-dom";
 import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon } from "lucide-react";
@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, STREAMING_INTERACTIVE_RE, abandonRun } from "@/lib/daimon/shell";
-import type { Block, Out, LsEntry } from "@/lib/daimon/shell";
+import type { Block, Out, LsEntry, GitStatusFile } from "@/lib/daimon/shell";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -184,6 +184,47 @@ function highlight(text: string, query: string): React.ReactNode {
       {text.slice(idx + query.length)}
     </>
   );
+}
+
+const SEARCH_MARK = "bg-amber-400/40 text-foreground rounded-[2px] not-italic";
+
+function searchRanges(text: string, query: string): [number, number][] {
+  if (!query) return [];
+  const lt = text.toLowerCase(), lq = query.toLowerCase();
+  const out: [number, number][] = [];
+  let i = 0;
+  while ((i = lt.indexOf(lq, i)) !== -1) { out.push([i, i + lq.length]); i += lq.length; }
+  return out;
+}
+
+/** Render styled runs of one line, overlaying search-match marks across run boundaries. */
+function renderSearchRuns(runs: { text: string; cls?: string | undefined }[], query: string): React.ReactNode {
+  const full = runs.map((r) => r.text).join("");
+  const ranges = searchRanges(full, query);
+  const out: React.ReactNode[] = [];
+  let pos = 0, key = 0;
+  for (const r of runs) {
+    const start = pos, end = pos + r.text.length;
+    const cuts = new Set([start, end]);
+    for (const [a, b] of ranges) {
+      if (a > start && a < end) cuts.add(a);
+      if (b > start && b < end) cuts.add(b);
+    }
+    const pts = [...cuts].sort((x, y) => x - y);
+    for (let k = 0; k < pts.length - 1; k++) {
+      const a = pts[k]!, b = pts[k + 1]!;
+      const t = full.slice(a, b);
+      if (ranges.some(([ra, rb]) => a >= ra && b <= rb)) out.push(<mark key={key++} className={SEARCH_MARK}>{t}</mark>);
+      else if (r.cls) out.push(<mark key={key++} className={r.cls}>{t}</mark>);
+      else out.push(<span key={key++}>{t}</span>);
+    }
+    pos = end;
+  }
+  return out;
+}
+
+function hl(text: string, query: string): React.ReactNode {
+  return query ? renderSearchRuns([{ text }], query) : text;
 }
 
 function linkify(text: string): React.ReactNode {
@@ -376,8 +417,10 @@ function parseUnifiedDiff(raw: string): DiffRow[] {
   return rows;
 }
 
-function DiffTable({ raw }: { raw: string }) {
+function DiffTable({ raw, search = "" }: { raw: string; search?: string }) {
   const rows = parseUnifiedDiff(raw);
+  const charRuns = (left: string, right: string, side: 0 | 1, cls: string) =>
+    renderSearchRuns((charDiff(left, right)[side] ?? []).map(([text, hi]) => ({ text, cls: hi ? cls : undefined })), search);
   const [split, setSplit] = useState(50);
   const tableRef = useRef<HTMLTableElement>(null);
 
@@ -402,12 +445,12 @@ function DiffTable({ raw }: { raw: string }) {
           <colgroup><col style={{ width: "2.5rem" }} /><col /></colgroup>
           <tbody>
             {rows.map((row, i) => {
-              if (row.kind === "hunk") return <tr key={i} className="bg-secondary/30"><td colSpan={2} className="px-3 py-0.5 text-muted-foreground/60">{row.text}</td></tr>;
-              if (row.kind === "same") return <tr key={i} className="hover:bg-secondary/20"><td className="select-none px-2 text-right tabular-nums text-muted-foreground/30">{row.ln}</td><td className="whitespace-pre-wrap break-all px-3 py-0 text-foreground/70">{row.text || " "}</td></tr>;
+              if (row.kind === "hunk") return <tr key={i} className="bg-secondary/30"><td colSpan={2} className="px-3 py-0.5 text-muted-foreground/60">{hl(row.text, search)}</td></tr>;
+              if (row.kind === "same") return <tr key={i} className="hover:bg-secondary/20"><td className="select-none px-2 text-right tabular-nums text-muted-foreground/30">{row.ln}</td><td className="whitespace-pre-wrap break-all px-3 py-0 text-foreground/70">{row.text ? hl(row.text, search) : " "}</td></tr>;
               return (
                 <tr key={i}>
                   <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30 bg-signal/5">{row.rln ?? ""}</td>
-                  <td className="whitespace-pre-wrap break-all px-3 py-0 bg-signal/10 text-signal">{row.right ?? ""}</td>
+                  <td className="whitespace-pre-wrap break-all px-3 py-0 bg-signal/10 text-signal">{hl(row.right ?? "", search)}</td>
                 </tr>
               );
             })}
@@ -440,7 +483,7 @@ function DiffTable({ raw }: { raw: string }) {
             if (row.kind === "hunk") {
               return (
                 <tr key={i} className="bg-secondary/30">
-                  <td colSpan={5} className="px-3 py-0.5 text-muted-foreground/60">{row.text}</td>
+                  <td colSpan={5} className="px-3 py-0.5 text-muted-foreground/60">{hl(row.text, search)}</td>
                 </tr>
               );
             }
@@ -448,10 +491,10 @@ function DiffTable({ raw }: { raw: string }) {
               return (
                 <tr key={i} className="group hover:bg-secondary/20">
                   <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30">{row.ln}</td>
-                  <td className="whitespace-pre-wrap break-all px-3 py-0 overflow-hidden text-foreground/70">{row.text || " "}</td>
+                  <td className="whitespace-pre-wrap break-all px-3 py-0 overflow-hidden text-foreground/70">{row.text ? hl(row.text, search) : " "}</td>
                   {divider}
                   <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30">{row.ln}</td>
-                  <td className="whitespace-pre-wrap break-all px-3 py-0 overflow-hidden text-foreground/70">{row.text || " "}</td>
+                  <td className="whitespace-pre-wrap break-all px-3 py-0 overflow-hidden text-foreground/70">{row.text ? hl(row.text, search) : " "}</td>
                 </tr>
               );
             }
@@ -460,19 +503,15 @@ function DiffTable({ raw }: { raw: string }) {
                 <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30 bg-alarm/5">{row.lln ?? ""}</td>
                 <td className={`overflow-hidden whitespace-pre-wrap break-all px-3 py-0 ${row.left !== null ? "bg-alarm/10 text-alarm" : "bg-transparent"}`}>
                   {row.left !== null && row.right !== null
-                    ? (charDiff(row.left, row.right)[0] ?? []).map(([txt, hi], k) =>
-                        hi ? <mark key={k} className="bg-transparent text-alarm not-italic">{txt}</mark> : <span key={k}>{txt}</span>
-                      )
-                    : row.left ?? ""}
+                    ? charRuns(row.left, row.right, 0, "bg-transparent text-alarm not-italic")
+                    : hl(row.left ?? "", search)}
                 </td>
                 {divider}
                 <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30 bg-signal/5">{row.rln ?? ""}</td>
                 <td className={`overflow-hidden whitespace-pre-wrap break-all px-3 py-0 ${row.right !== null ? "bg-signal/10 text-signal" : "bg-transparent"}`}>
                   {row.left !== null && row.right !== null
-                    ? (charDiff(row.left, row.right)[1] ?? []).map(([txt, hi], k) =>
-                        hi ? <mark key={k} className="bg-transparent text-signal not-italic">{txt}</mark> : <span key={k}>{txt}</span>
-                      )
-                    : row.right ?? ""}
+                    ? charRuns(row.left, row.right, 1, "bg-transparent text-signal not-italic")
+                    : hl(row.right ?? "", search)}
                 </td>
               </tr>
             );
@@ -483,7 +522,7 @@ function DiffTable({ raw }: { raw: string }) {
   );
 }
 
-function FileDiffView({ fullHash, filePath, cwd }: { fullHash: string; filePath: string; cwd: string }) {
+function FileDiffView({ fullHash, filePath, cwd, search = "" }: { fullHash: string; filePath: string; cwd: string; search?: string }) {
   const [diff, setDiff] = useState<string | "loading">("loading");
 
   useEffect(() => {
@@ -493,14 +532,14 @@ function FileDiffView({ fullHash, filePath, cwd }: { fullHash: string; filePath:
   if (diff === "loading") return <p className="py-1 font-mono text-[13px] text-muted-foreground">Loading diff…</p>;
   if (!diff.trim()) return <p className="py-1 font-mono text-[13px] text-muted-foreground">No diff available.</p>;
 
-  return <DiffTable raw={diff} />;
+  return <DiffTable raw={diff} search={search} />;
 }
 
 function CommitDetailView({
-  fullHash, cwd,
+  fullHash, cwd, search = "",
   fileCursor, openFiles, onToggleFile, fileRowRefs, onLoaded,
 }: {
-  fullHash: string; cwd: string;
+  fullHash: string; cwd: string; search?: string;
   fileCursor: number | null;
   openFiles: Set<string>;
   onToggleFile: (path: string) => void;
@@ -520,7 +559,7 @@ function CommitDetailView({
   return (
     <div className="mt-1">
       {detail.body && (
-        <p className="mb-2 font-mono text-[13px] text-muted-foreground/70 whitespace-pre-wrap">{detail.body}</p>
+        <p className="mb-2 font-mono text-[13px] text-muted-foreground/70 whitespace-pre-wrap">{hl(detail.body, search)}</p>
       )}
       <div className="divide-y divide-line/30">
         {detail.files.map((f, fi) => {
@@ -535,11 +574,11 @@ function CommitDetailView({
                 <ChevronRightIcon className={`size-3 shrink-0 text-muted-foreground/40 transition-transform ${fileOpen ? "rotate-90" : ""}`} />
                 <span className="w-10 shrink-0 text-right tabular-nums font-mono text-[13px] text-signal">+{f.additions}</span>
                 <span className="w-10 shrink-0 text-right tabular-nums font-mono text-[13px] text-alarm">-{f.deletions}</span>
-                <span className="flex-1 truncate font-mono text-[13px] text-foreground/80">{f.path}</span>
+                <span className="flex-1 truncate font-mono text-[13px] text-foreground/80">{hl(f.path, search)}</span>
               </button>
               {fileOpen && (
                 <div className="pb-2 pl-4">
-                  <FileDiffView fullHash={fullHash} filePath={f.path} cwd={cwd} />
+                  <FileDiffView fullHash={fullHash} filePath={f.path} cwd={cwd} search={search} />
                 </div>
               )}
             </div>
@@ -551,6 +590,10 @@ function CommitDetailView({
 }
 
 // ── Shared fullscreen pager shell ────────────────────────────────────────────
+type OpenPager = { pane: string | null };
+/** Open pagers in open order; the last one per pane owns the keyboard. */
+const openPagers: OpenPager[] = [];
+
 function FullscreenPager({
   title,
   isLast,
@@ -573,32 +616,56 @@ function FullscreenPager({
   const [fullscreen, setFullscreen] = useState(() => !!isLast);
   const searchRef = useRef<HTMLInputElement>(null);
   const sentinelRef = useRef<HTMLSpanElement>(null);
-  const containerRef = useRef<HTMLElement | null>(null);
+  const [container, setContainer] = useState<HTMLElement | null>(null);
   const [search, setSearch] = useState("");
+  const entryRef = useRef<OpenPager | null>(null);
 
-  const openFullscreen = () => {
-    containerRef.current = sentinelRef.current?.closest("[data-pane]") as HTMLElement ?? document.body;
-    setFullscreen(true);
-  };
-
-  useEffect(() => {
-    window.dispatchEvent(new CustomEvent(fullscreen ? "pager-open" : "pager-close"));
-    return () => { if (fullscreen) window.dispatchEvent(new CustomEvent("pager-close")); };
-  }, [fullscreen]);
-
-  useEffect(() => {
-    if (sentinelRef.current && !containerRef.current) {
-      containerRef.current = sentinelRef.current.closest("[data-pane]") as HTMLElement ?? document.body;
-    }
+  // Resolve the pane this pager lives in before paint, so the overlay is
+  // always scoped to its own split pane (never the whole window).
+  useLayoutEffect(() => {
+    const el = (sentinelRef.current?.closest("[data-pane]") as HTMLElement | null) ?? document.body;
+    if (el !== container) setContainer(el);
   });
+  const paneId = container && container !== document.body ? container.getAttribute("data-pane") : null;
+
+  useEffect(() => {
+    if (!fullscreen || !container) return;
+    const entry: OpenPager = { pane: paneId };
+    entryRef.current = entry;
+    openPagers.push(entry);
+    window.dispatchEvent(new CustomEvent("pager-open", { detail: { paneId } }));
+    return () => {
+      const i = openPagers.indexOf(entry);
+      if (i >= 0) openPagers.splice(i, 1);
+      if (entryRef.current === entry) entryRef.current = null;
+      window.dispatchEvent(new CustomEvent("pager-close", { detail: { paneId } }));
+    };
+  }, [fullscreen, container, paneId]);
 
   useEffect(() => {
     if (!fullscreen) return;
     const handler = (e: KeyboardEvent) => {
+      // Only the topmost pager in the focused pane reacts to keys.
+      const me = entryRef.current;
+      if (!me) return;
+      const top = [...openPagers].reverse().find((p) => p.pane === me.pane);
+      if (top !== me) return;
+      if (container && container !== document.body && container.dataset["paneFocused"] === "false") return;
+      const ae = document.activeElement as HTMLElement | null;
+      const inSearch = ae === searchRef.current;
+      // Another text field (e.g. a modal) has focus — leave its keys alone.
+      if (!inSearch && ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+
       if (e.key === "Tab") { e.preventDefault(); return; }
-      if (e.key === "q" || (e.ctrlKey && e.key === "c") || (e.metaKey && e.key === "c")) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         e.preventDefault();
-        if (document.activeElement === searchRef.current) { searchRef.current?.blur(); return; }
+        if (inSearch) { searchRef.current?.blur(); return; }
+        setFullscreen(false);
+        return;
+      }
+      if (inSearch) { onKey(e, true); return; } // let every character (q, /, f…) be typed
+      if (e.key === "q") {
+        e.preventDefault();
         setFullscreen(false);
         return;
       }
@@ -608,20 +675,21 @@ function FullscreenPager({
         return;
       }
       if (e.key === "/" || e.key === "f") {
-        if (document.activeElement !== searchRef.current) { e.preventDefault(); searchRef.current?.focus(); return; }
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
       }
-      const inSearch = document.activeElement === searchRef.current;
-      onKey(e, inSearch);
+      onKey(e, false);
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [fullscreen, onToggleAll, onKey]);
+  }, [fullscreen, container, onToggleAll, onKey]);
 
   if (!fullscreen) {
     return (
       <button
         className="flex items-center gap-3 py-1 font-mono text-[13px] hover:opacity-80 transition-opacity"
-        onClick={openFullscreen}
+        onClick={() => setFullscreen(true)}
       >
         <span ref={sentinelRef} />
         {collapsedSummary}
@@ -630,12 +698,11 @@ function FullscreenPager({
     );
   }
 
-  const container = containerRef.current ?? document.body;
-  const isScoped = container !== document.body;
+  const isScoped = !!container && container !== document.body;
   return (
     <>
       <span ref={sentinelRef} style={{ display: "none" }} />
-      {createPortal(
+      {container && createPortal(
     <div className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background pager-overlay font-mono text-[13px]`}>
       <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0">
         <span className="text-muted-foreground/60">{title}</span>
@@ -760,11 +827,16 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
       onKey={onKey}
     >
       {(search: string) => {
+        const lq = search.toLowerCase();
+        // Expanded commits stay visible so matches inside their diffs can be seen;
+        // loaded changed-file paths count as matches too.
         const filtered = search
           ? entries.filter((e) =>
-              e.subject.toLowerCase().includes(search.toLowerCase()) ||
-              e.author.toLowerCase().includes(search.toLowerCase()) ||
-              e.hash.startsWith(search) || e.fullHash.startsWith(search)
+              e.subject.toLowerCase().includes(lq) ||
+              e.author.toLowerCase().includes(lq) ||
+              e.hash.startsWith(search) || e.fullHash.startsWith(search) ||
+              expanded.has(e.hash) ||
+              (filePathsRef.current[e.hash] ?? []).some((p) => p.toLowerCase().includes(lq))
             )
           : entries;
         filteredRef.current = filtered;
@@ -801,7 +873,7 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
                       <div className="mt-2 border-t border-line/30 pt-2">
                         <p className="mb-1 font-mono text-[13px] text-muted-foreground/50 tracking-wide">changed files</p>
                         <CommitDetailView
-                          fullHash={e.fullHash} cwd={cwd}
+                          fullHash={e.fullHash} cwd={cwd} search={search}
                           fileCursor={i === commitIdx ? fileIdx : null}
                           openFiles={openFiles[e.hash] ?? new Set()}
                           onToggleFile={(path) => toggleFile(e.hash, path)}
@@ -945,63 +1017,158 @@ function GitBranchesView({ branches, current }: Extract<Out, { kind: "gitbranche
   );
 }
 
+// git's own wording, so the view reads like `git status` at a glance.
 const GIT_XY: Record<string, { label: string; cls: string }> = {
-  M: { label: "modified", cls: "text-amber-400" },
-  A: { label: "added", cls: "text-signal" },
+  M: { label: "modified", cls: "text-amber-400/90" },
+  A: { label: "new file", cls: "text-signal" },
   D: { label: "deleted", cls: "text-alarm" },
-  R: { label: "renamed", cls: "text-blue-400" },
-  C: { label: "copied", cls: "text-blue-400" },
-  U: { label: "unmerged", cls: "text-alarm" },
+  R: { label: "renamed", cls: "text-sky-400" },
+  C: { label: "copied", cls: "text-sky-400" },
+  T: { label: "typechange", cls: "text-purple-400" },
+  U: { label: "conflict", cls: "text-alarm" },
 };
 
-function GitStatusView({ branch, ahead, behind, staged, unstaged, untracked, onCd }: Extract<Out, { kind: "gitstatus" }> & { onCd?: (path: string) => void }) {
+function splitPath(p: string): [dir: string, base: string] {
+  const trimmed = p.endsWith("/") ? p.slice(0, -1) : p;
+  const i = trimmed.lastIndexOf("/");
+  const tail = p.endsWith("/") ? "/" : "";
+  return i < 0 ? ["", trimmed + tail] : [trimmed.slice(0, i + 1), trimmed.slice(i + 1) + tail];
+}
+
+function GitPath({ path, dim, onCd }: { path: string; dim?: boolean; onCd?: ((path: string) => void) | undefined }) {
+  const [dir, base] = splitPath(path);
+  const body = (
+    <>
+      {dir && <span className="text-muted-foreground/45">{dir}</span>}
+      <span className={dim ? "text-foreground/60" : "text-foreground/90"}>{base}</span>
+    </>
+  );
+  return onCd ? (
+    <button className="truncate text-left font-mono underline-offset-4 decoration-muted-foreground/30 hover:underline" title={`cd ${dir || "."}`} onClick={() => onCd(path)}>{body}</button>
+  ) : (
+    <span className="truncate">{body}</span>
+  );
+}
+
+function GitStatusSection({
+  title, hint, rail, items, onCd,
+}: {
+  title: string;
+  hint: string;
+  rail: string;
+  items: { label: string; labelCls: string; path: string; from?: string | undefined; add?: number | undefined; del?: number | undefined; dim?: boolean }[];
+  onCd?: ((path: string) => void) | undefined;
+}) {
+  return (
+    <section className="group/sec relative pl-4">
+      <span aria-hidden className={`absolute left-0 top-1 bottom-1 w-px ${rail}`} />
+      <header className="mb-1.5 flex items-baseline gap-2 font-mono">
+        <span className="text-[12px] font-medium text-foreground/85">{title}</span>
+        <span className="rounded-full bg-secondary/60 px-1.5 text-[10px] tabular-nums text-muted-foreground">{items.length}</span>
+        <span className="ml-auto text-[11px] text-muted-foreground/0 transition-colors group-hover/sec:text-muted-foreground/45">{hint}</span>
+      </header>
+      <div className="grid grid-cols-[5.5rem_minmax(0,1fr)_auto] items-baseline gap-x-3 font-mono text-[13px] leading-6">
+        {items.map((it) => (
+          <React.Fragment key={(it.from ?? "") + it.path}>
+            <span className={`text-[11px] ${it.labelCls}`}>{it.label}</span>
+            <span className="flex min-w-0 items-baseline gap-1.5">
+              {it.from && (
+                <>
+                  <span className="truncate text-muted-foreground/45 line-through decoration-muted-foreground/25">{it.from}</span>
+                  <span className="text-muted-foreground/40">→</span>
+                </>
+              )}
+              <GitPath path={it.path} dim={it.dim ?? false} onCd={onCd} />
+            </span>
+            <span className="flex justify-end gap-2 text-[11px] tabular-nums">
+              {!!it.add && <span className="text-signal/80">+{it.add}</span>}
+              {!!it.del && <span className="text-alarm/80">−{it.del}</span>}
+            </span>
+          </React.Fragment>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function GitStatusView({ branch, upstream, ahead, behind, staged, unstaged, untracked, added, removed, onCd }: Extract<Out, { kind: "gitstatus" }> & { onCd?: (path: string) => void }) {
   if (!branch) return <div className="font-mono text-[13px] text-muted-foreground/50">not a git repository</div>;
   const clean = staged.length === 0 && unstaged.length === 0 && untracked.length === 0;
-  const Section = ({ title, items, cls }: { title: string; items: { xy: string; path: string }[]; cls: string }) => (
-    <div className="space-y-0.5">
-      <div className="font-mono text-[11px] text-muted-foreground/50 tracking-wide pb-0.5">{title}</div>
-      {items.map(({ xy, path }) => {
-        const info = GIT_XY[xy.toUpperCase()] ?? { label: xy, cls: "text-muted-foreground" };
-        return (
-          <div key={path} className="flex items-baseline gap-3 font-mono text-[13px]">
-            <span className={`w-16 shrink-0 text-[11px] ${cls || info.cls}`}>{info.label}</span>
-            {onCd ? (
-              <button className="font-mono hover:text-signal hover:underline cursor-pointer" onClick={() => onCd(path)}>{path}</button>
-            ) : (
-              <span className="text-foreground">{path}</span>
-            )}
-          </div>
-        );
-      })}
-    </div>
+  const conflicts = unstaged.filter((f) => f.xy.toUpperCase() === "U");
+  const toItem = (f: GitStatusFile) => {
+    const info = GIT_XY[f.xy.toUpperCase()] ?? { label: f.xy, cls: "text-muted-foreground" };
+    return { label: info.label, labelCls: info.cls, path: f.path, from: f.from, add: f.add, del: f.del };
+  };
+
+  // Sync state, phrased like git but compact.
+  let sync: React.ReactNode;
+  if (!upstream) sync = <span className="text-muted-foreground/50">no upstream</span>;
+  else if (!ahead && !behind) sync = <span className="text-muted-foreground/60">up to date</span>;
+  else sync = (
+    <span className="flex items-center gap-2">
+      {ahead > 0 && <span className="text-amber-400/90">↑{ahead} to push</span>}
+      {behind > 0 && <span className="text-sky-400">↓{behind} to pull</span>}
+    </span>
   );
 
   return (
-    <div className="space-y-3">
-      {/* Branch line */}
-      <div className="flex items-center gap-2 font-mono text-[13px]">
-        <GitBranchIcon className="size-3 text-purple-400/70" />
-        <span className="text-purple-400">{branch}</span>
-        {ahead > 0 && <span className="text-muted-foreground/50">↑{ahead}</span>}
-        {behind > 0 && <span className="text-muted-foreground/50">↓{behind}</span>}
-        {clean && <span className="text-signal/60 text-[11px] ml-1">clean</span>}
+    <div className="space-y-5 font-mono">
+      {/* Branch / upstream */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
+        <span className="flex items-center gap-1.5">
+          <GitBranchIcon className="size-3.5 text-purple-400/80" />
+          <span className="font-medium text-purple-300">{branch}</span>
+        </span>
+        {upstream && (
+          <span className="flex items-center gap-1.5 text-[12px]">
+            <span className="text-muted-foreground/35">→</span>
+            <span className="text-muted-foreground/70">{upstream}</span>
+          </span>
+        )}
+        <span className="text-[12px]">{sync}</span>
+        {!clean && (
+          <span className="ml-auto flex items-center gap-3 text-[11px] tabular-nums text-muted-foreground/60">
+            <span>
+              {[
+                staged.length && `${staged.length} staged`,
+                unstaged.length && `${unstaged.length} changed`,
+                untracked.length && `${untracked.length} untracked`,
+              ].filter(Boolean).join(" · ")}
+            </span>
+            {(!!added || !!removed) && (
+              <span className="flex gap-1.5">
+                <span className="text-signal/80">+{added ?? 0}</span>
+                <span className="text-alarm/80">−{removed ?? 0}</span>
+              </span>
+            )}
+          </span>
+        )}
       </div>
-      {staged.length > 0 && <Section title="staged" items={staged} cls="text-signal" />}
-      {unstaged.length > 0 && <Section title="not staged" items={unstaged} cls="" />}
-      {untracked.length > 0 && (
-        <div className="space-y-0.5">
-          <div className="font-mono text-[11px] text-muted-foreground/50 tracking-wide pb-0.5">untracked</div>
-          {untracked.map((p) => (
-            <div key={p} className="flex items-baseline gap-3 font-mono text-[13px]">
-              <span className="w-16 shrink-0 text-[11px] text-muted-foreground/50">new</span>
-              {onCd ? (
-                <button className="font-mono text-foreground/70 hover:text-signal hover:underline cursor-pointer" onClick={() => onCd(p)}>{p}</button>
-              ) : (
-                <span className="text-foreground/70">{p}</span>
-              )}
-            </div>
-          ))}
+
+      {clean && (
+        <div className="flex items-center gap-2 text-[13px] text-muted-foreground/70">
+          <span className="text-signal">✓</span>
+          nothing to commit, working tree clean
         </div>
+      )}
+
+      {conflicts.length > 0 && (
+        <GitStatusSection title="Unmerged paths" hint="fix conflicts, then git add <file>" rail="bg-alarm/60" items={conflicts.map(toItem)} onCd={onCd} />
+      )}
+      {staged.length > 0 && (
+        <GitStatusSection title="Staged" hint="git restore --staged <file> to unstage" rail="bg-signal/60" items={staged.map(toItem)} onCd={onCd} />
+      )}
+      {unstaged.length - conflicts.length > 0 && (
+        <GitStatusSection title="Not staged" hint="git add <file> to stage" rail="bg-amber-400/50" items={unstaged.filter((f) => f.xy.toUpperCase() !== "U").map(toItem)} onCd={onCd} />
+      )}
+      {untracked.length > 0 && (
+        <GitStatusSection
+          title="Untracked"
+          hint="git add <file> to track"
+          rail="bg-muted-foreground/30"
+          items={untracked.map((p) => ({ label: p.endsWith("/") ? "dir" : "", labelCls: "text-muted-foreground/40", path: p, dim: true }))}
+          onCd={onCd}
+        />
       )}
     </div>
   );
@@ -1616,9 +1783,11 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
       }, [])}
       onKey={onKey}
     >
-      {(_search: string) => (
+      {(search: string) => (
         <div className="flex-1 overflow-y-auto divide-y divide-border/30">
-          {files.map((f, i) => (
+          {files.map((f, i) => {
+            const hits = search ? countMatches(f.raw.slice(Math.max(0, f.raw.indexOf("\n@@"))), search) : 0;
+            return (
             <div key={f.path}>
               <button
                 ref={(el) => { rowRefs.current[i] = el; }}
@@ -1628,15 +1797,17 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
                 <ChevronRightIcon className={`size-3 shrink-0 text-muted-foreground/40 transition-transform ${openFiles.has(f.path) ? "rotate-90" : ""}`} />
                 <span className="w-10 shrink-0 text-right tabular-nums text-signal">+{f.additions}</span>
                 <span className="w-10 shrink-0 text-right tabular-nums text-alarm">-{f.deletions}</span>
-                <span className="flex-1 truncate text-foreground/80">{f.path}</span>
+                <span className="flex-1 truncate text-foreground/80">{hl(f.path, search)}</span>
+                {hits > 0 && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-[11px] text-amber-400">{hits} match{hits !== 1 ? "es" : ""}</span>}
               </button>
               {openFiles.has(f.path) && (
                 <div className="px-4 pb-3">
-                  <DiffTable raw={f.raw} />
+                  <DiffTable raw={f.raw} search={search} />
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </FullscreenPager>
@@ -2145,10 +2316,28 @@ function StdinRow({ sessionId }: { sessionId: string }) {
   );
 }
 
+/** Collapsed output clamp; output taller than this is "long" and becomes collapsible. */
+const COLLAPSED_MAX_PX = 320;
+
 export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; tuiHandle?: import("@/components/daimon/XTermPanel").XTermHandle | undefined; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const ok = block.code === 0;
   const failed = !block.pending && !ok;
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpandedRaw] = useState(true);
+  // Once the user toggles a block by hand, stop auto-collapsing it.
+  const userToggledRef = useRef(false);
+  const setExpanded = useCallback((v: boolean | ((x: boolean) => boolean)) => {
+    userToggledRef.current = true;
+    setExpandedRaw(v);
+  }, []);
+
+  // Super-shift (⌘⇧ hover + E) toggles collapse on this block.
+  useEffect(() => {
+    const onToggle = (e: Event) => {
+      if ((e as CustomEvent).detail?.blockId === block.id) setExpanded((x) => !x);
+    };
+    window.addEventListener("block-toggle-collapse", onToggle);
+    return () => window.removeEventListener("block-toggle-collapse", onToggle);
+  }, [block.id, setExpanded]);
 
   useEffect(() => {
     if (!isLast) return;
@@ -2160,7 +2349,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isLast]);
+  }, [isLast, setExpanded]);
 
   // Inline TUI: create xterm directly in this block's div
   const inlineTuiRef = useRef<HTMLDivElement>(null);
@@ -2336,12 +2525,18 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
   }, [isTuiActive]);
 
   const outputRef = useRef<HTMLDivElement>(null);
-  const [overflows, setOverflows] = useState(false);
+  // "Long" = natural output height exceeds the collapsed clamp. Only long blocks are collapsible.
+  const [isLong, setIsLong] = useState(false);
   useEffect(() => {
     const el = outputRef.current;
     if (!el) return;
-    setOverflows(el.scrollHeight > el.clientHeight + 4);
+    const long = el.scrollHeight > COLLAPSED_MAX_PX + 4;
+    if (long !== isLong) setIsLong(long);
   });
+  // Smart default: when a newer block arrives, auto-collapse this one if it's long.
+  useEffect(() => {
+    if (!isLast && isLong && !block.pending && !userToggledRef.current) setExpandedRaw(false);
+  }, [isLast, isLong, block.pending]);
 
   const copyOutput = () => {
     const text = block.out
@@ -2425,21 +2620,23 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
         <div className="relative mt-2.5">
           <div
             ref={outputRef}
-            className={`space-y-3 overflow-hidden transition-all ${expanded ? "" : "max-h-80"}`}
+            data-collapsible={isLong ? (expanded ? "expanded" : "collapsed") : undefined}
+            className="space-y-3 overflow-hidden transition-all"
+            style={expanded || !isLong ? undefined : { maxHeight: COLLAPSED_MAX_PX }}
           >
             {block.out.map((o, i) => (
               <OutView key={i} out={o} input={block.input} ctx={block.ctx || currentCtx} isLast={!!isLast && i === block.out.length - 1} onSearch={onSearch ?? null} {...(onPathClick ? { onPathClick } : {})} />
             ))}
           </div>
-          {(!expanded && overflows || expanded) && (
-            <div className={`${!expanded && overflows ? "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-paper to-transparent pt-8 pb-1" : "mt-1"} flex justify-center`}>
+          {!expanded && isLong && (
+            <div className="absolute bottom-0 left-0 right-0 flex justify-center bg-gradient-to-t from-paper to-transparent pt-8 pb-1">
               <button
-                onClick={() => setExpanded((x) => !x)}
+                onClick={() => setExpanded(true)}
+                title="Expand (hold ⌘⇧ + E while hovering)"
                 className="flex items-center gap-1.5 rounded-full border border-line bg-card px-3 py-0.5 font-mono text-[11px] text-muted-foreground shadow-sm hover:text-foreground transition-colors"
               >
-                {expanded ? <ChevronUpIcon className="size-3" /> : <ChevronDownIcon className="size-3" />}
-                {expanded ? "collapse" : "expand"}
-                {isLast && <span className="opacity-40 ml-0.5">⌘E</span>}
+                <ChevronDownIcon className="size-3" />
+                expand
               </button>
             </div>
           )}

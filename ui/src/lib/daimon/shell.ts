@@ -14,6 +14,9 @@ export type LsEntry = {
   link?: string;     // symlink target
 };
 
+/** One changed file in `git status`; add/del are line counts (absent for binaries). */
+export type GitStatusFile = { xy: string; path: string; from?: string; add?: number; del?: number };
+
 export type Out =
   | { kind: "lines"; lines: string[]; tone?: "normal" | "muted" | "bad" | "good" }
   | { kind: "ansi"; html: string }
@@ -24,7 +27,7 @@ export type Out =
   | { kind: "pairs"; pairs: [string, string][] }
   | { kind: "gitlog"; entries: { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean }[]; cwd: string }
   | { kind: "gitbranches"; branches: string[]; current: string }
-  | { kind: "gitstatus"; branch: string; ahead: number; behind: number; staged: { xy: string; path: string }[]; unstaged: { xy: string; path: string }[]; untracked: string[] }
+  | { kind: "gitstatus"; branch: string; upstream?: string | null; ahead: number; behind: number; staged: GitStatusFile[]; unstaged: GitStatusFile[]; untracked: string[]; added?: number; removed?: number }
   | { kind: "gitdiff"; raw: string }
   | { kind: "logfmt"; lines: Record<string, string>[] }
   | { kind: "pretty"; format: "json" | "yaml"; text: string };

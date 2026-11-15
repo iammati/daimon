@@ -125,12 +125,20 @@ function blockOutputText(b: Block): string {
     if (o.kind === "lslong") return [`total ${o.total}`, ...o.entries.map(e => `${e.perms} ${e.links} ${e.user} ${e.group} ${e.size} ${e.month} ${e.day} ${e.time} ${e.name}${e.link ? ` -> ${e.link}` : ""}`)];
     if (o.kind === "files") return o.items.map(f => `${f.dir ? "d" : "-"} ${f.name}${f.size !== undefined ? `  ${f.size}` : ""}`);
     if (o.kind === "gitstatus") {
+      // Mirrors real `git status` so pasted output reads familiar.
+      const word: Record<string, string> = { M: "modified", A: "new file", D: "deleted", R: "renamed", C: "copied", T: "typechange", U: "both modified" };
+      const row = (f: { xy: string; path: string; from?: string }) => `\t${(word[f.xy.toUpperCase()] ?? f.xy) + ":"}`.padEnd(14) + (f.from ? `${f.from} -> ${f.path}` : f.path);
       const lines: string[] = [`On branch ${o.branch}`];
-      if (o.ahead) lines.push(`ahead ${o.ahead}`);
-      if (o.behind) lines.push(`behind ${o.behind}`);
-      if (o.staged.length) { lines.push("staged:"); o.staged.forEach(f => lines.push(`  ${f.xy} ${f.path}`)); }
-      if (o.unstaged.length) { lines.push("not staged:"); o.unstaged.forEach(f => lines.push(`  ${f.xy} ${f.path}`)); }
-      if (o.untracked.length) { lines.push("untracked:"); o.untracked.forEach(f => lines.push(`  ${f}`)); }
+      if (o.upstream) {
+        if (o.ahead && o.behind) lines.push(`Your branch and '${o.upstream}' have diverged (${o.ahead} and ${o.behind} commits).`);
+        else if (o.ahead) lines.push(`Your branch is ahead of '${o.upstream}' by ${o.ahead} commit${o.ahead > 1 ? "s" : ""}.`);
+        else if (o.behind) lines.push(`Your branch is behind '${o.upstream}' by ${o.behind} commit${o.behind > 1 ? "s" : ""}.`);
+        else lines.push(`Your branch is up to date with '${o.upstream}'.`);
+      }
+      if (o.staged.length) lines.push("", "Changes to be committed:", ...o.staged.map(row));
+      if (o.unstaged.length) lines.push("", "Changes not staged for commit:", ...o.unstaged.map(row));
+      if (o.untracked.length) lines.push("", "Untracked files:", ...o.untracked.map((f) => `\t${f}`));
+      if (!o.staged.length && !o.unstaged.length && !o.untracked.length) lines.push("", "nothing to commit, working tree clean");
       return lines;
     }
     return [];
@@ -183,7 +191,9 @@ function Daimon() {
   const [hoveredBlockId, setHoveredBlockId] = useState<string | null>(null);
   const [blockModActive, setBlockModActive] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [pagerActive, setPagerActive] = useState(false);
+  // Open fullscreen pagers (git log / git diff) per pane id; "" = unscoped.
+  const [pagerPanes, setPagerPanes] = useState<Record<string, number>>({});
+  const pagerActive = Object.values(pagerPanes).some((n) => n > 0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [keysModalOpen, setKeysModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -318,6 +328,41 @@ function Daimon() {
     return () => { off(); };
   }, []);
 
+  // The shell context above only arrives when a command goes through the shell prompt.
+  // Commands daimon renders itself (git status / log / diff …) and changes made elsewhere
+  // (editor, another terminal, a commit) never trigger it — so also ask the daemon directly:
+  // when a command finishes, when the window regains focus, and every few seconds while visible.
+  const gitCwd = "/" + active.state.cwd.join("/");
+  const gitLastBlock = active.blocks[active.blocks.length - 1];
+  const gitRefreshKey = `${gitLastBlock?.id ?? ""}:${gitLastBlock?.pending ? 1 : 0}`;
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      if (document.hidden) return;
+      shell.gitStatus(gitCwd).then((s) => {
+        if (cancelled) return;
+        if (!s || s.error || !s.branch) { setGitBranch(null); return; }
+        setGitBranch(s.branch);
+        setGitDirty(s.staged.length > 0 || s.unstaged.length > 0);
+        setGitAhead(s.ahead || 0);
+        setGitBehind(s.behind || 0);
+        // (A daemon started before this field existed doesn't send counts — keep the shell's.)
+        if (s.added !== undefined) setGitAdded(s.added);
+        if (s.removed !== undefined) setGitRemoved(s.removed);
+      }).catch(() => {});
+    };
+    refresh();
+    const timer = setInterval(refresh, 5000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [gitCwd, gitRefreshKey]);
+
   // Gaze → block id mapping
   const cycleTheme = () => {
     const next: Theme = theme === "light" ? "dracula" : "light";
@@ -327,7 +372,6 @@ function Daimon() {
 
   const cmdDisabled = active.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input));
   const cmdPrompting = cmdDisabled && active.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input) && isPromptingForInput(b));
-  const hideBottomBar = altScreenActive || tuiBlockIds.has(activeId) || pagerActive;
   const effectiveHoveredBlockId = pagerActive ? null : hoveredBlockId;
   const effectiveBlockModActive = pagerActive ? false : blockModActive;
 
@@ -428,9 +472,25 @@ function Daimon() {
     return () => window.removeEventListener("focus", () => focusComposer());
   }, []);
 
+  const focusedSidRef = useRef(activeId);
+  focusedSidRef.current = focusedPane === "right" && splitSessionId ? splitSessionId : activeId;
+
   useEffect(() => {
-    const onOpen = () => setPagerActive(true);
-    const onClose = () => setPagerActive(false);
+    const bump = (e: Event, d: number) => {
+      const pane = ((e as CustomEvent).detail?.paneId as string | null | undefined) ?? "";
+      setPagerPanes((prev) => {
+        const n = Math.max(0, (prev[pane] ?? 0) + d);
+        const next = { ...prev };
+        if (n) next[pane] = n; else delete next[pane];
+        return next;
+      });
+    };
+    const onOpen = (e: Event) => bump(e, 1);
+    const onClose = (e: Event) => {
+      bump(e, -1);
+      // Composer is unhidden on the next render — focus it once that has painted.
+      requestAnimationFrame(() => setTimeout(() => focusComposer(focusedSidRef.current), 0));
+    };
     window.addEventListener("pager-open", onOpen);
     window.addEventListener("pager-close", onClose);
     return () => { window.removeEventListener("pager-open", onOpen); window.removeEventListener("pager-close", onClose); };
@@ -566,7 +626,7 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, sessions, historyOpen]);
 
-  // Block hover shortcuts: ⌘⇧ (or ⌃⇧) + C/I/O/R
+  // Block hover shortcuts: ⌘⇧ (or ⌃⇧) + C/I/O/R/E
   const blockModRef = useRef(false);
   useEffect(() => {
     const onDown = (e: KeyboardEvent) => {
@@ -591,6 +651,9 @@ function Daimon() {
       } else if (key === "R") {
         e.preventDefault();
         submit(block.input);
+      } else if (key === "E") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("block-toggle-collapse", { detail: { blockId: block.id } }));
       }
     };
     const onUp = (e: KeyboardEvent) => {
@@ -710,7 +773,7 @@ function Daimon() {
     const pane = sessions.find((s) => s.id === paneSessionId) ?? sessions[0]!;
     const paneDisabled = pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input));
     const panePrompting = paneDisabled && pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input) && isPromptingForInput(b));
-    const paneHideBar = (altScreenActive && paneSessionId === activeId) || tuiBlockIds.has(paneSessionId) || pagerActive;
+    const paneHideBar = (altScreenActive && paneSessionId === activeId) || tuiBlockIds.has(paneSessionId) || !!pagerPanes[paneSessionId] || !!pagerPanes[""];
     return (
       <>
         <div
@@ -728,8 +791,7 @@ function Daimon() {
               <LandingPage
                 blocks={pane.blocks}
                 history={pane.history}
-                onResume={() => {}}
-                onCd={(path) => submit(`cd ${path}`, paneSessionId)}
+                onCd={(path) => submit(`cd ${/[\s"'$`\\]/.test(path) ? JSON.stringify(path) : path}`, paneSessionId)}
                 onRun={(cmd) => submit(cmd, paneSessionId)}
                 onOpenPalette={() => setPaletteOpen(true)}
               />
@@ -746,13 +808,18 @@ function Daimon() {
                     <BlockView block={b} onRerun={(cmd) => submit(cmd, paneSessionId)} isLast={i === pane.blocks.length - 1} currentCtx={pane.state.ctx.name} sessionId={pane.id} isTuiActive={tuiBlockIds.get(pane.id) === b.id} promptingForInput={panePrompting && !!b.pending} onSearch={(q) => { setGlobalSearchQuery(q); setGlobalSearchOpen(true); }} onPathClick={(path) => { const expanded = path.startsWith("~") ? __HOME__ + path.slice(1) : path; const hasExt = /\.[^/]+$/.test(expanded.split("/").pop() ?? ""); const dir = hasExt ? expanded.split("/").slice(0, -1).join("/") || "/" : expanded; submit("cd " + JSON.stringify(dir), paneSessionId); toast("cd " + dir, { duration: 2000 }); }} />
                     {effectiveHoveredBlockId === b.id && effectiveBlockModActive && (
                       <div className="absolute top-2 right-2 flex items-center gap-1 rounded-md border border-signal/30 bg-card/90 px-2 py-1 backdrop-blur-sm shadow-sm">
-                        {[["C","copy all"],["I","cmd"],["O","output"],["R","re-run"]].map(([k, label]) => (
-                          <span key={k} className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
-                            <kbd className="rounded bg-signal/15 px-1 py-0.5 text-signal font-semibold">{k}</kbd>
-                            <span>{label}</span>
-                            {k !== "R" && <span className="text-border mx-0.5">·</span>}
-                          </span>
-                        ))}
+                        {(() => {
+                          const collapsible = blockRefsMap.current.get(b.id)?.querySelector<HTMLElement>("[data-collapsible]")?.dataset["collapsible"];
+                          const actions: [string, string][] = [["C", "copy all"], ["I", "cmd"], ["O", "output"], ["R", "re-run"]];
+                          if (collapsible) actions.push(["E", collapsible === "expanded" ? "collapse" : "expand"]);
+                          return actions.map(([k, label], ai) => (
+                            <span key={k} className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
+                              <kbd className="rounded bg-signal/15 px-1 py-0.5 text-signal font-semibold">{k}</kbd>
+                              <span>{label}</span>
+                              {ai < actions.length - 1 && <span className="text-border mx-0.5">·</span>}
+                            </span>
+                          ));
+                        })()}
                       </div>
                     )}
                   </div>
@@ -1180,6 +1247,8 @@ function Daimon() {
         <div className="flex flex-1 overflow-hidden" data-split-root>
           <div
             data-pane={activeId}
+            data-pane-focused={String(focusedPane === "left" || !splitSessionId)}
+            onMouseDown={() => { if (splitSessionId && focusedPane !== "left") setFocusedPane("left"); }}
             className={`relative flex min-w-0 flex-col overflow-hidden transition-[flex] duration-300 ease-in-out${splitSessionId && focusedPane === "right" ? " opacity-70" : ""}`}
             style={{ flex: splitSessionId ? splitRatio : 1 }}
           >
@@ -1194,7 +1263,7 @@ function Daimon() {
               >
                 <div className="h-8 w-0.5 rounded-full bg-border group-hover:bg-signal/60 transition-colors duration-150" />
               </div>
-              <div data-pane={splitSessionId} className={`relative flex min-w-0 flex-col overflow-hidden animate-in slide-in-from-right-8 duration-300${focusedPane === "left" ? " opacity-70" : ""}`} style={{ flex: 1 - splitRatio }}>
+              <div data-pane={splitSessionId} data-pane-focused={String(focusedPane === "right")} onMouseDown={() => { if (focusedPane !== "right") setFocusedPane("right"); }} className={`relative flex min-w-0 flex-col overflow-hidden animate-in slide-in-from-right-8 duration-300${focusedPane === "left" ? " opacity-70" : ""}`} style={{ flex: 1 - splitRatio }}>
                 {renderPane(splitSessionId, focusedPane === "right")}
               </div>
             </>

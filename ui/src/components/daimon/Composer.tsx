@@ -149,10 +149,17 @@ export function Composer({
 
   useEffect(() => {
     const focus = (e: KeyboardEvent) => {
-      if (e.key === "/" && !interactive && document.activeElement !== inputRef.current) {
-        e.preventDefault();
-        inputRef.current?.focus();
-      }
+      if (e.key !== "/" || interactive || e.defaultPrevented) return;
+      const el = inputRef.current;
+      if (!el || document.activeElement === el) return;
+      // Don't steal "/" from another text field (e.g. a pager's search input).
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      // Hidden (pager/TUI open in this pane) or in the unfocused split pane.
+      if (el.offsetParent === null) return;
+      if ((el.closest("[data-pane]") as HTMLElement | null)?.dataset["paneFocused"] === "false") return;
+      e.preventDefault();
+      el.focus();
     };
     const focusFromEvent = (e: Event) => {
       const sid = (e as CustomEvent).detail?.sessionId;

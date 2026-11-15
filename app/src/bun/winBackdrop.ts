@@ -1,15 +1,19 @@
-// Windows-only: real desktop blur behind the window, via DWM.
+// Windows-only: real desktop blur behind the window.
 //
 // WebView2 can't blur what's behind the window (CSS backdrop-filter only sees page
 // pixels), so the blur has to come from the compositor. The page stays transparent
-// and DWM draws the blurred desktop underneath it.
+// and the blurred desktop is drawn underneath it. Two ways to get it:
 //
-// DWM has no adjustable blur radius — it offers three distinct looks, which the
-// Settings blur slider is mapped onto:
-//   none    → plain see-through, no blur          (slider 0,     "off")
-//   blur    → gaussian blur                       (slider 1–30,  "soft")
-//   acrylic → heavier frosted-glass blur + noise  (slider 31–60, "frosted")
-// Keep backdropForBlur() in sync with nativeBlurLabel() in ui/src/lib/daimon/appearance.ts.
+// 1. win_backdrop.dll (crates/win-backdrop) — a composition layer under the webview
+//    that blurs the desktop with any radius. Used when the DLL is available.
+// 2. DWM's built-in looks, as a fallback. DWM has no adjustable radius, so the slider
+//    is mapped onto three steps:
+//      none    → plain see-through, no blur          (slider 0,     "off")
+//      blur    → gaussian blur                       (slider 1–30,  "soft")
+//      acrylic → heavier frosted-glass blur + noise  (slider 31–60, "frosted")
+//    Keep backdropForBlur() in sync with nativeBlurLabel() in ui/src/lib/daimon/appearance.ts.
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
 
 export type BackdropKind = "none" | "blur" | "acrylic";
@@ -130,4 +134,61 @@ export function setBackdrop(hwnd: Pointer | null, kind: BackdropKind): boolean {
     console.warn("[backdrop] apply failed:", err);
     return false;
   }
+}
+
+// ── Variable-radius blur (win_backdrop.dll) ───────────────────────────────────
+
+type BlurLib = {
+  daimon_backdrop_attach(hwnd: Pointer): number;
+  daimon_backdrop_set_blur(hwnd: Pointer, strength: number, extra: number): number;
+};
+let blurLib: BlurLib | null = null;
+
+/** Where the helper DLL is: DAIMON_BACKDROP_DLL (dev), else next to the executable. */
+function blurLibPath(): string | null {
+  const candidates = [process.env.DAIMON_BACKDROP_DLL, join(dirname(process.execPath), "win_backdrop.dll")];
+  return candidates.find((p): p is string => !!p && existsSync(p)) ?? null;
+}
+
+/** Load the helper. False (with a log line) if it's missing or won't load. */
+export function loadVariableBlur(): boolean {
+  if (process.platform !== "win32") return false;
+  if (blurLib) return true;
+  const path = blurLibPath();
+  if (!path) return false;
+  try {
+    blurLib = dlopen(path, {
+      daimon_backdrop_attach: { args: [FFIType.ptr], returns: FFIType.i32 },
+      daimon_backdrop_set_blur: { args: [FFIType.ptr, FFIType.f32, FFIType.f32], returns: FFIType.i32 },
+    }).symbols as unknown as BlurLib;
+    return true;
+  } catch (err) {
+    console.warn("[backdrop] couldn't load", path, err);
+    return false;
+  }
+}
+
+const hr = (code: number) => "0x" + (code >>> 0).toString(16).padStart(8, "0");
+
+/** Put the blur layer under the window's webview. Call after prepareWindow(). */
+export function attachVariableBlur(hwnd: Pointer | null): boolean {
+  if (!hwnd || !blurLib) return false;
+  const code = blurLib.daimon_backdrop_attach(hwnd);
+  if (code !== 0) console.warn("[backdrop] attach failed:", hr(code));
+  return code === 0;
+}
+
+/** Top of the Settings blur slider. */
+const BLUR_MAX = 60;
+
+/**
+ * Blur radius from the Settings slider, in px (same scale as CSS blur()).
+ * 0 = plain see-through.
+ */
+export function setVariableBlur(hwnd: Pointer | null, blur: number): boolean {
+  if (!hwnd || !blurLib) return false;
+  const v = Math.min(BLUR_MAX, Math.max(0, blur));
+  const code = blurLib.daimon_backdrop_set_blur(hwnd, v > 0 ? 1 : 0, v);
+  if (code !== 0) console.warn("[backdrop] set blur failed:", hr(code));
+  return code === 0;
 }

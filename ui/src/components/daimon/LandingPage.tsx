@@ -77,7 +77,6 @@ type ResumeInfo = { cwd: string; cmd: string; ts: number; git: GitInfo };
 type Props = {
   blocks: Block[];
   history?: string[];
-  onResume: () => void;
   onCd: (path: string) => void;
   onRun?: (cmd: string) => void;
   onOpenPalette?: () => void;
@@ -117,7 +116,7 @@ const SHORTCUTS: { key: string; label: string; Icon: React.FC<{ className?: stri
   { key: "⌘P",  label: "Commands",    Icon: CommandIcon },
 ];
 
-export function LandingPage({ blocks, history = [], onResume, onCd, onRun, onOpenPalette }: Props) {
+export function LandingPage({ blocks, history = [], onCd, onRun, onOpenPalette }: Props) {
   const [resume, setResume] = useState<ResumeInfo | null>(null);
   const [recentDirs, setRecentDirs] = useState<RecentDir[]>([]);
   const [failed, setFailed] = useState<FailedItem[]>([]);
@@ -215,7 +214,7 @@ export function LandingPage({ blocks, history = [], onResume, onCd, onRun, onOpe
       {/* ── Hero ── */}
       <div className="mb-14">
         <p className="mb-4 font-sans text-[14px] text-muted-foreground/80">
-          {greet} You are in
+          {greet} {blocks.length > 0 ? "You are in" : "You were last in"}
         </p>
 
         {heroCwd ? (
@@ -255,11 +254,12 @@ export function LandingPage({ blocks, history = [], onResume, onCd, onRun, onOpe
         )}
 
         <button
-          onClick={onResume}
-          className="flex items-center gap-2 border border-border bg-card veil-surface px-4 py-2.5 font-sans text-[13px] text-foreground transition-colors hover:border-signal/50 hover:bg-accent"
+          onClick={() => { if (resume) onCd(resume.cwd); }}
+          disabled={!resume}
+          className="flex items-center gap-2 border border-border bg-card veil-surface px-4 py-2.5 font-sans text-[13px] text-foreground transition-colors hover:border-signal/50 hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
         >
           <CornerDownLeftIcon className="size-3.5 text-signal" />
-          Open here
+          Continue here
         </button>
       </div>
 

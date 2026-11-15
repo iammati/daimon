@@ -76,6 +76,18 @@ win_build() {
   cp "$ROOT/app/electrobun.config.ts" "$WIN_STAGE/app/" || return 1
   (cd "$WIN_STAGE/app" && ../tools/bun.exe node_modules/electrobun/bin/electrobun.cjs build </dev/null)
 }
+# Build the blur helper DLL (crates/win-backdrop) and put it next to the staged app.
+# Optional: without it the app falls back to DWM's three fixed blur steps.
+win_build_blur() {
+  local dll
+  if dll=$("$ROOT/crates/win-backdrop/build.sh") && cp "$dll" "$WIN_STAGE/win_backdrop.dll"; then
+    export DAIMON_BACKDROP_DLL="$WIN_STAGE/win_backdrop.dll"
+  else
+    rm -f "$WIN_STAGE/win_backdrop.dll"
+    unset DAIMON_BACKDROP_DLL
+    log "blur helper not built — using Windows' fixed blur steps (see crates/win-backdrop/build.sh)"
+  fi
+}
 if [ "$PLATFORM" = wsl ] && [ "${DAIMON_WINDOWS:-1}" != 0 ]; then
   if win_setup; then
     WIN_NATIVE=1
@@ -176,9 +188,12 @@ curl -sf http://localhost:7881 >/dev/null 2>&1 || die "Vite didn't come up on :7
 if [ "$WIN_NATIVE" = 1 ]; then
   log "building Electrobun app (Windows)..."
   if win_build; then
+    log "building blur helper (Windows)..."
+    win_build_blur
     log "launching Electrobun app (Windows)..."
     # Windows reaches the daemon (:7878) and Vite (:7881) through WSL's localhost forwarding.
-    export WSLENV="${WSLENV:+$WSLENV:}DAIMON_TRANSPARENT:DAIMON_BACKDROP"
+    # (/p = translate the WSL path to a Windows path.)
+    export WSLENV="${WSLENV:+$WSLENV:}DAIMON_TRANSPARENT:DAIMON_BACKDROP:DAIMON_BLUR:DAIMON_BACKDROP_DLL/p"
     (cd "$WIN_STAGE/app" && exec ../tools/bun.exe node_modules/electrobun/bin/electrobun.cjs run </dev/null) &
     PIDS+=($!)
   else
@@ -196,24 +211,6 @@ if [ "$WIN_NATIVE" = 0 ]; then
 cd "$ROOT/app"
 log "building Electrobun app..."
 node node_modules/electrobun/bin/electrobun.cjs build
-
-# macOS only: inject allow_magnification.dylib (pinch-zoom) into the launcher.
-patch_cottontail() {
-  local dylib_src="$ROOT/app/allow_magnification.dylib"
-  [ -f "$dylib_src" ] || return 0
-  local macos_dir
-  macos_dir=$(ls -d "$ROOT"/app/build/dev-macos-*/*.app/Contents/MacOS 2>/dev/null | head -1)
-  [ -n "$macos_dir" ] || return 0
-  local ct="$macos_dir/cottontail" real="$macos_dir/cottontail.real"
-  [ -f "$ct" ] || return 0
-  head -1 "$ct" 2>/dev/null | grep -q "^#!/bin/sh" && return 0   # already wrapped
-  cp "$dylib_src" "$macos_dir/allow_magnification.dylib"
-  mv "$ct" "$real"
-  printf '#!/bin/sh\nDYLIB="$(dirname "$0")/allow_magnification.dylib"\nREAL="$(dirname "$0")/cottontail.real"\nexec env DYLD_INSERT_LIBRARIES="$DYLIB" "$REAL" "$@"\n' > "$ct"
-  chmod +x "$ct"
-  log "magnification patch applied"
-}
-[ "$PLATFORM" = macos ] && patch_cottontail
 
 log "launching Electrobun app..."
 node node_modules/electrobun/bin/electrobun.cjs run &

@@ -34,16 +34,18 @@ export function applyGlass(g: Glass) {
   } catch { /* shell bridge unavailable */ }
 }
 
-/** True when the native window blurs the desktop itself (Windows/DWM). */
-export function hasNativeBlur(): boolean {
-  return document.documentElement.classList.contains("native-blur");
+/**
+ * How the native window blurs the desktop behind it, if it does:
+ * "variable" = continuously (Windows, helper DLL), "steps" = fixed looks (Windows/DWM fallback).
+ */
+export function nativeBlurMode(): "variable" | "steps" | null {
+  const mode = document.documentElement.dataset["nativeBlur"];
+  return mode === "variable" || mode === "steps" ? mode : null;
 }
 
-/**
- * The compositor has no blur radius — only distinct looks. Mirrors backdropForBlur()
- * in app/src/bun/winBackdrop.ts.
- */
-export function nativeBlurLabel(blur: number): string {
+/** What the blur slider shows for a native blur. Mirrors app/src/bun/winBackdrop.ts. */
+export function nativeBlurLabel(blur: number, mode: "variable" | "steps"): string {
+  if (mode === "variable") return `${blur}px`;
   return blur <= 0 ? "off" : blur <= 30 ? "soft" : "frosted";
 }
 
