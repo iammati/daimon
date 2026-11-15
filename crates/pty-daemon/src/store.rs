@@ -65,6 +65,38 @@ impl Store {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS blocks_fts USING fts5(
+                id UNINDEXED,
+                input,
+                cwd UNINDEXED,
+                ts UNINDEXED,
+                exit_code UNINDEXED,
+                content='blocks',
+                content_rowid='rowid'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS blocks_fts_insert AFTER INSERT ON blocks BEGIN
+                INSERT INTO blocks_fts(rowid, id, input, cwd, ts, exit_code)
+                VALUES (new.rowid, new.id, new.input, new.cwd, new.ts, new.exit_code);
+            END;
+            CREATE TRIGGER IF NOT EXISTS blocks_fts_delete AFTER DELETE ON blocks BEGIN
+                INSERT INTO blocks_fts(blocks_fts, rowid, id, input, cwd, ts, exit_code)
+                VALUES ('delete', old.rowid, old.id, old.input, old.cwd, old.ts, old.exit_code);
+            END;
+            CREATE TRIGGER IF NOT EXISTS blocks_fts_update AFTER UPDATE ON blocks BEGIN
+                INSERT INTO blocks_fts(blocks_fts, rowid, id, input, cwd, ts, exit_code)
+                VALUES ('delete', old.rowid, old.id, old.input, old.cwd, old.ts, old.exit_code);
+                INSERT INTO blocks_fts(rowid, id, input, cwd, ts, exit_code)
+                VALUES (new.rowid, new.id, new.input, new.cwd, new.ts, new.exit_code);
+            END;
+        ")?;
+
+        // Backfill FTS for any existing blocks not yet indexed
+        conn.execute_batch("
+            INSERT OR IGNORE INTO blocks_fts(rowid, id, input, cwd, ts, exit_code)
+            SELECT rowid, id, input, cwd, ts, exit_code FROM blocks
+            WHERE rowid NOT IN (SELECT rowid FROM blocks_fts);
         ")?;
         let store = Store(Arc::new(Mutex::new(conn)));
         store.import_zsh_history()?;
@@ -86,10 +118,13 @@ impl Store {
 
     pub fn history_list(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
         let conn = self.0.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, cmd, ts, source FROM history ORDER BY ts DESC LIMIT ?1"
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |r| Ok(HistoryEntry {
+        let sql = if limit >= 1_000_000 {
+            "SELECT id, cmd, ts, source FROM history ORDER BY ts DESC".to_string()
+        } else {
+            format!("SELECT id, cmd, ts, source FROM history ORDER BY ts DESC LIMIT {}", limit)
+        };
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |r| Ok(HistoryEntry {
             id: r.get(0)?,
             cmd: r.get(1)?,
             ts: r.get(2)?,
@@ -153,6 +188,47 @@ impl Store {
         let conn = self.0.lock().unwrap();
         conn.execute("DELETE FROM blocks WHERE session_id=?1", params![session_id])?;
         Ok(())
+    }
+
+    /// FTS5 search across block inputs. Returns matching blocks newest-first.
+    pub fn blocks_search(&self, query: &str, limit: usize) -> Result<Vec<BlockRow>> {
+        let conn = self.0.lock().unwrap();
+        // Escape special FTS5 characters and append * for prefix matching
+        let q = format!("\"{}\"*", query.replace('"', "\"\""));
+        let mut stmt = conn.prepare(
+            "SELECT b.id, b.session_id, b.input, b.cwd, b.ctx, b.ts, b.exit_code, b.output_json
+             FROM blocks_fts f
+             JOIN blocks b ON b.id = f.id
+             WHERE blocks_fts MATCH ?1
+             ORDER BY b.ts DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![q, limit as i64], |r| Ok(BlockRow {
+            id: r.get(0)?,
+            session_id: r.get(1)?,
+            input: r.get(2)?,
+            cwd: r.get(3)?,
+            ctx: r.get(4)?,
+            ts: r.get(5)?,
+            exit_code: r.get(6)?,
+            output_json: r.get(7)?,
+        }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Simple LIKE search across history commands.
+    pub fn history_search(&self, query: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+        let conn = self.0.lock().unwrap();
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT id, cmd, ts, source FROM history WHERE cmd LIKE ?1 ORDER BY ts DESC LIMIT ?2"
+        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64], |r| Ok(HistoryEntry {
+            id: r.get(0)?,
+            cmd: r.get(1)?,
+            ts: r.get(2)?,
+            source: r.get(3)?,
+        }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     // ── Prefs ────────────────────────────────────────────────────────────────

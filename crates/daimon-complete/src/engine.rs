@@ -1,5 +1,5 @@
 use crate::registry::global;
-use crate::spec::{ArgKind, Subcommand};
+use crate::spec::ArgKind;
 use crate::tokenize::tokenize;
 use serde::Serialize;
 use std::path::Path;
@@ -114,6 +114,7 @@ fn complete_arg(kind: &ArgKind, partial: &str, cwd: &str) -> Vec<Suggestion> {
         ArgKind::GitBranch  => git_refs(partial, cwd, GitRefKind::Branch),
         ArgKind::GitTag     => git_refs(partial, cwd, GitRefKind::Tag),
         ArgKind::GitRemote  => git_refs(partial, cwd, GitRefKind::Remote),
+        ArgKind::GitDirty   => git_dirty(partial, cwd),
         ArgKind::String     => vec![],
     }
 }
@@ -191,6 +192,39 @@ fn git_refs(partial: &str, cwd: &str, kind: GitRefKind) -> Vec<Suggestion> {
                 }
             }
         }
+    }
+    out
+}
+
+fn git_dirty(partial: &str, cwd: &str) -> Vec<Suggestion> {
+    let Ok(repo) = git2::Repository::discover(cwd) else { return vec![] };
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(false)  // collapse untracked dirs, don't explode into files
+        .exclude_submodules(true);
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else { return vec![] };
+    let mut out = Vec::new();
+    for entry in statuses.iter() {
+        let s = entry.status();
+        let is_modified = s.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_RENAMED,
+        );
+        let is_untracked = s.contains(git2::Status::WT_NEW);
+        if !is_modified && !is_untracked { continue; }
+        let Some(path) = entry.path() else { continue };
+        if !path.starts_with(partial) { continue; }
+        // Modified files get File kind; untracked entries may be dirs — use Dir kind for those
+        let kind = if is_untracked && path.ends_with('/') {
+            SuggestionKind::Dir
+        } else {
+            SuggestionKind::File
+        };
+        out.push(Suggestion { text: path.to_string(), description: None, kind });
     }
     out
 }

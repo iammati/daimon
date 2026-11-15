@@ -29,27 +29,8 @@ export async function completeNative(
   history: string[] = [],
   historyTs: number[] = [],
 ): Promise<{ items: Suggestion[]; token: string }> {
+  void history; void historyTs; // history ghost is handled in Composer, not the dropdown
   const token = currentToken(input);
-
-  // History: prefix-match on whole input, always available instantly.
-  const histItems: Suggestion[] = [];
-  if (input.trim()) {
-    const lower = input.toLowerCase();
-    const trailingSpace = /\s$/.test(input);
-    const seen = new Set<string>();
-    for (let i = history.length - 1; i >= 0; i--) {
-      const h = history[i]!;
-      if (h === input || seen.has(h)) continue;
-      if (!h.toLowerCase().startsWith(lower) || h.length <= input.length) continue;
-      // Only suggest when input ends with space (new arg) OR history extends the current token
-      // (next char is not a space — e.g. "ls -la" → "ls -lah ..." but NOT "ls -la logs").
-      const nextChar = h[input.length];
-      if (!trailingSpace && nextChar === " ") continue;
-      seen.add(h);
-      histItems.push({ value: h, label: h, hint: "history", kind: "history", score: 10, replace: "all", ...(historyTs[i] !== undefined ? { ts: historyTs[i] } : {}) });
-      if (histItems.length >= 5) break;
-    }
-  }
 
   const raw = await shell.completeNative(input, cwd).catch(() => []);
   const items: Suggestion[] = raw.map((s, i) => ({
@@ -78,12 +59,6 @@ export async function completeNative(
   }
 
   const result = filtered;
-
-  // Merge: native first, history appended (deduped)
-  const seen = new Set(result.map((s) => s.value));
-  for (const h of histItems) {
-    if (!seen.has(h.value)) result.push(h);
-  }
 
   return { items: result, token };
 }

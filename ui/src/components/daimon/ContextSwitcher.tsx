@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { RefreshCwIcon } from "lucide-react";
 import { shell } from "@/lib/daimon/rpc";
+import kubernetesIcon from "@/assets/kubernetes-icon.svg";
 
 function highlight(text: string, query: string): React.ReactNode {
   if (!query) return text;
@@ -9,7 +10,7 @@ function highlight(text: string, query: string): React.ReactNode {
   return (
     <>
       {text.slice(0, idx)}
-      <mark className="bg-signal/20 text-signal rounded-[2px] not-italic">{text.slice(idx, idx + query.length)}</mark>
+      <mark className="bg-signal/20 text-signal not-italic">{text.slice(idx, idx + query.length)}</mark>
       {text.slice(idx + query.length)}
     </>
   );
@@ -109,11 +110,12 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
     <div className="relative" ref={box}>
       <button
         onClick={() => setOpenTracked(!open)}
-        className="flex items-center gap-2 rounded-full border border-border bg-card py-1.5 pl-3 pr-2.5 transition-colors hover:border-signal/50"
+        className="flex items-center gap-2 border border-border bg-card py-1.5 pl-3 pr-2.5 transition-colors hover:border-signal/50"
         aria-expanded={open}
       >
-        <span className="size-1.5 rounded-full bg-signal" />
+        <img src={kubernetesIcon} alt="" className="size-3.5 shrink-0" />
         <span className="font-mono text-[12px] text-foreground">{ctxName || "no context"}</span>
+        <kbd className="ml-1 font-mono text-[10px] text-muted-foreground/50 border border-border/60 px-1 py-0.5 leading-none">⌘J</kbd>
       </button>
 
       {open && (

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderIcon, FileIcon, GitBranchIcon, ClockIcon } from "lucide-react";
+import { FolderIcon, FileIcon, ClockIcon } from "lucide-react";
 import { applySuggestion, completeNative, type Suggestion } from "@/lib/daimon/complete";
 import { displayPath } from "@/lib/daimon/world";
 import { sendRaw, onAltScreenChange, getAltScreen } from "@/lib/daimon/shell";
@@ -23,10 +23,8 @@ export function Composer({
   history,
   historyTs = [],
   onSubmit,
-  gitBranch,
-  gitDirty,
-  gitAhead,
-  gitBehind,
+  onDraftChange,
+  initialValue = "",
   sessionId = "",
   disabled = false,
   streamingActive: _streamingActive = false,
@@ -37,6 +35,8 @@ export function Composer({
   history: string[];
   historyTs?: number[];
   onSubmit: (cmd: string) => void;
+  onDraftChange?: (v: string) => void;
+  initialValue?: string;
   gitBranch?: string | null;
   gitDirty?: boolean;
   gitAhead?: number;
@@ -47,8 +47,9 @@ export function Composer({
   promptingForInput?: boolean;
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const valueRef = useRef("");
-  const [value, setValue] = useState("");
+  const activeItemRef = useRef<HTMLLIElement>(null);
+  const valueRef = useRef(initialValue);
+  const [value, setValue] = useState(initialValue);
   const [active, setActive] = useState(0);
   const [open, setOpen] = useState(false);
   const dismissed = useRef(false);
@@ -63,6 +64,7 @@ export function Composer({
   const setInputValue = (v: string) => {
     valueRef.current = v;
     setValue(v);
+    onDraftChange?.(v);
     if (inputRef.current) {
       inputRef.current.value = v;
       const end = v.length;
@@ -95,6 +97,10 @@ export function Composer({
     return () => { if (completeDebounce.current) clearTimeout(completeDebounce.current); };
   }, [value, cwd, history]);
 
+  useEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [active]);
+
   const visible = open && items.length >= 2;
   const top = items[Math.min(active, items.length - 1)];
   // Inline ghost: top token-replacing suggestion whose value extends the typed token.
@@ -125,15 +131,21 @@ export function Composer({
   }, [items]);
 
   const [interactive, setInteractive] = useState(false);
-  const [branchOpen, setBranchOpen] = useState(false);
-  const [branches, setBranches] = useState<string[]>([]);
-  const [branchQ, setBranchQ] = useState("");
 
   useEffect(() => {
     setInteractive(getAltScreen(sessionId));
     return onAltScreenChange(sessionId, setInteractive);
   }, [sessionId]);
   useEffect(() => { if (interactive) inputRef.current?.blur(); }, [interactive]);
+
+  // On mount: if there's a draft, position cursor at end
+  useEffect(() => {
+    if (initialValue && inputRef.current) {
+      const len = initialValue.length;
+      inputRef.current.setSelectionRange(len, len);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     const focus = (e: KeyboardEvent) => {
@@ -142,17 +154,36 @@ export function Composer({
         inputRef.current?.focus();
       }
     };
-    const focusFromEvent = () => { if (!interactive) inputRef.current?.focus(); };
+    const focusFromEvent = (e: Event) => {
+      const sid = (e as CustomEvent).detail?.sessionId;
+      if (sid && sid !== sessionId) return;
+      if (!interactive) inputRef.current?.focus();
+    };
+    const prefillFromEvent = (e: Event) => {
+      const { sessionId: sid, text } = (e as CustomEvent).detail ?? {};
+      if (sid && sid !== sessionId) return;
+      if (!interactive && typeof text === "string") {
+        setValue(text);
+        valueRef.current = text;
+        setTimeout(() => {
+          inputRef.current?.focus();
+          inputRef.current?.setSelectionRange(text.length, text.length);
+        }, 0);
+      }
+    };
     window.addEventListener("keydown", focus);
     window.addEventListener("focus-composer", focusFromEvent);
+    window.addEventListener("prefill-composer", prefillFromEvent);
     return () => {
       window.removeEventListener("keydown", focus);
       window.removeEventListener("focus-composer", focusFromEvent);
+      window.removeEventListener("prefill-composer", prefillFromEvent);
     };
   }, [interactive]);
 
-  const accept = (i = active): string => {
-    const s = items[i];
+  const accept = (i = active, fromItems?: Suggestion[]): string => {
+    const src = fromItems ?? items;
+    const s = src[Math.min(i, src.length - 1)];
     if (!s) return valueRef.current;
     const next = applySuggestion(valueRef.current, token, s.value, s);
     const trailing = (s.kind === "file" || s.kind === "dir") && s.value.endsWith("/") ? next : next + " ";
@@ -170,11 +201,17 @@ export function Composer({
     if (visible) { accept(); return; }
     // If no items yet but completion in-flight, wait for it
     let current = items;
+    let currentToken = token;
     if (current.length === 0 && completePromise.current) {
       const result = await completePromise.current;
-      if (result) { current = result.items; setItems(result.items); setToken(result.token); }
+      if (result) { current = result.items; currentToken = result.token; setItems(result.items); setToken(result.token); }
     }
-    if (current.length === 1 || (current.length > 0 && specGhost)) { accept(); return; }
+    // Compute ghost inline from current (state may not have updated yet)
+    const currentTop = current[0];
+    const currentGhost = currentTop && currentTop.replace === "token" && currentTop.kind !== "file" && currentTop.kind !== "dir" && currentToken && currentTop.value.toLowerCase().startsWith(currentToken.toLowerCase())
+      ? currentTop.value.slice(currentToken.length)
+      : "";
+    if (current.length === 1 || (current.length > 0 && currentGhost)) { accept(0, current); return; }
     if (current.length > 1) { dismissed.current = false; setOpen(true); return; }
     if (historyGhost) { setInputValue(value + historyGhost); setOpen(false); return; }
   };
@@ -288,7 +325,7 @@ export function Composer({
         <div className="absolute bottom-[calc(100%+0.5rem)] left-0 w-full max-w-md overflow-hidden rounded-xl border border-border bg-card shadow-[0_18px_50px_-24px_oklch(0.2_0.02_265_/_0.35)]">
           <ul className="max-h-64 overflow-y-auto py-1">
             {items.map((s, i) => (
-              <li key={`${s.kind}:${s.value}:${i}`}>
+              <li key={`${s.kind}:${s.value}:${i}`} ref={i === active ? activeItemRef : null}>
                 <button
                   onMouseDown={(e) => { e.preventDefault(); accept(i); }}
                   onMouseEnter={() => setActive(i)}
@@ -327,59 +364,6 @@ export function Composer({
             </span>
           : <span className="font-mono text-[13px] text-muted-foreground/60 pt-0.5 shrink-0 select-none">{displayPath(cwd)}</span>
         }
-        {/* Branch pill — left of ›, clickable to switch branches */}
-        {gitBranch && !interactive && !disabled && (
-          <div className="relative shrink-0">
-            <button
-              className="flex items-center gap-1 pt-0.5 font-mono text-[11px] text-purple-400/80 hover:text-purple-400 transition-colors select-none"
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!branchOpen) {
-                  const cwdStr = "/" + cwd.join("/");
-                  shell.listBranches(cwdStr).then(({ branches }) => { if (branches.length) setBranches(branches); }).catch(() => {});
-                }
-                setBranchOpen((o) => !o);
-                setBranchQ("");
-              }}
-              title="Switch branch"
-            >
-              <GitBranchIcon className="size-3" />
-              <span className="max-w-[140px] truncate">{gitBranch}</span>
-              {gitDirty && <span className="text-amber-400/70">●</span>}
-              {(gitAhead ?? 0) > 0 && <span className="text-purple-400/50">↑{gitAhead}</span>}
-              {(gitBehind ?? 0) > 0 && <span className="text-purple-400/50">↓{gitBehind}</span>}
-            </button>
-            {branchOpen && (
-              <div className="absolute bottom-[calc(100%+0.5rem)] left-0 z-30 w-64 overflow-hidden rounded-xl border border-border bg-card shadow-[0_18px_50px_-24px_oklch(0.2_0.02_265_/_0.35)]">
-                <div className="border-b border-border px-3 py-2">
-                  <input
-                    autoFocus
-                    value={branchQ}
-                    onChange={(e) => setBranchQ(e.target.value)}
-                    placeholder="Filter branches…"
-                    autoComplete="off" autoCorrect="off" spellCheck={false}
-                    className="w-full bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground/50"
-                    onKeyDown={(e) => { if (e.key === "Escape") setBranchOpen(false); e.stopPropagation(); }}
-                  />
-                </div>
-                <ul className="max-h-56 overflow-y-auto py-1">
-                  {(branchQ ? branches.filter((b) => b.toLowerCase().includes(branchQ.toLowerCase())) : branches).map((b) => (
-                    <li key={b}>
-                      <button
-                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-accent transition-colors font-mono text-[12px] ${b === gitBranch ? "text-signal" : "text-foreground"}`}
-                        onClick={() => { setBranchOpen(false); onSubmit(`git checkout ${b}`); }}
-                      >
-                        <GitBranchIcon className={`size-3 shrink-0 ${b === gitBranch ? "text-signal" : "text-muted-foreground/40"}`} />
-                        <span className="truncate">{b}</span>
-                        {b === gitBranch && <span className="ml-auto text-[10px] text-signal">current</span>}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        )}
         <span className="font-mono text-[13px] text-signal pt-0.5 shrink-0 select-none">›</span>
         <div className="relative flex-1 min-w-0">
           {disabled && !promptingForInput
@@ -394,10 +378,11 @@ export function Composer({
           <textarea
             ref={inputRef}
             rows={1}
-            defaultValue=""
+            defaultValue={initialValue}
             onChange={(e) => {
               valueRef.current = e.target.value;
               setValue(e.target.value);
+              onDraftChange?.(e.target.value);
               setHistIndex(null);
               histNavPrefix.current = null;
               autoResize();
@@ -417,7 +402,7 @@ export function Composer({
             autoCorrect="off"
             autoCapitalize="off"
             aria-label={`Command in ${ctx}`}
-            // placeholder={"Type a command, or press Tab to see everything"}
+            placeholder="Run a command"
             className="relative w-full resize-none overflow-hidden bg-transparent font-mono text-[14px] leading-6 text-foreground [caret-color:var(--color-foreground)] outline-none placeholder:text-muted-foreground/40"
             style={{ height: "1.5rem" }}
           />

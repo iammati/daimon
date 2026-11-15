@@ -17,6 +17,7 @@ export type LsEntry = {
 export type Out =
   | { kind: "lines"; lines: string[]; tone?: "normal" | "muted" | "bad" | "good" }
   | { kind: "ansi"; html: string }
+  | { kind: "image"; src: string }
   | { kind: "files"; items: { name: string; dir: boolean; size?: number | undefined }[] }
   | { kind: "lslong"; entries: LsEntry[]; total: string }
   | { kind: "table"; head: string[]; rows: string[][]; accentCol?: number }
@@ -46,8 +47,10 @@ export type State = { cwd: string[]; ctx: { name: string }; gitBranch?: string }
 const FULLSCREEN_MODE = /\x1b\[\?1049h/;
 
 // Commands that stream interactively in daimon's own block view (no xterm panel).
-// Input is forwarded via the composer; output streams into the block.
-export const STREAMING_INTERACTIVE_RE = /^\s*(ssh|sftp|mosh|nc\s+|ncat\s+|telnet\s+)/;
+// Input is forwarded via the composer; output streams into the block as plain lines.
+// ssh/sftp/mosh: connect + auth (password, host-key, 2FA) via forwarded stdin, banner
+// streams as block output, then the warpify bootstrap flips the session to block mode.
+export const STREAMING_INTERACTIVE_RE = /^\s*(ssh\b|sftp\b|mosh\b|nc\s+|ncat\s+|telnet\s+)/;
 
 // Commands that need xterm panel takeover (alt-screen TUI).
 // Only list commands where we MUST route before any output (interactive shells, exec/attach).
@@ -77,10 +80,41 @@ shell.onAltScreen((tabId, enter) => {
 const inStreamingSessionMap = new Map<string, boolean>();
 export function isStreamingSession(tabId: string) { return inStreamingSessionMap.get(tabId) ?? false; }
 
-// Active run cleanups — lets cancel button force-abandon a stuck run
-const activeCleanups = new Map<string, () => void>();
+// Per-tab warpify state — a streaming SSH session whose remote shell has accepted
+// daimon's OSC 133 bootstrap (markers are flowing). When true, remote commands route
+// through the normal block path instead of raw PTY passthrough.
+const inWarpifiedMap = new Map<string, boolean>();
+export function isWarpified(tabId: string) { return inWarpifiedMap.get(tabId) ?? false; }
+
+// Base64 of shell-integration/warpify.zsh — pure-zsh OSC 133 bootstrap pushed over SSH.
+// Regenerate on payload change: `base64 -i shell-integration/warpify.zsh | tr -d '\n'`.
+const WARPIFY_PAYLOAD_B64 =
+  "IyBkYWltb24gcmVtb3RlIHdhcnBpZnkgcGF5bG9hZCDigJQgc291cmNlZCBpbnRvIGEgcmVtb3RlIHpzaCBvdmVyIFNTSC4KIyBQdXJlIHpzaCwgbm8gYmluYXJ5OiBlbWl0cyB0aGUgc2FtZSBPU0MgMTMzIG1hcmtlcnMgZGFpbW9uJ3MgbG9jYWwgaW50ZWdyYXRpb24gZW1pdHMsCiMgc28gdGhlIGRhZW1vbiBwYXJzZXMgcmVtb3RlIGNvbW1hbmQgYm91bmRhcmllcyBleGFjdGx5IGxpa2UgbG9jYWwgb25lcy4KIyBHaXQgaW5mbyB2aWEgYGdpdGAgc3VicHJvY2VzcyAobGliZ2l0MiB1bmF2YWlsYWJsZSByZW1vdGVseSk7IHNpbGVudCB3aGVuIGdpdCBhYnNlbnQuCgpfZGFpbW9uX3JlbW90ZV9wcmVjbWQoKSB7CiAgbG9jYWwgY29kZT0kPwogIGxvY2FsIHB3ZD0iJHtQV0R9IgogIGxvY2FsIGJyYW5jaD0iIiBkaXJ0eT1mYWxzZQogIGlmIGNvbW1hbmQgZ2l0IHJldi1wYXJzZSAtLWlzLWluc2lkZS13b3JrLXRyZWUgJj4vZGV2L251bGw7IHRoZW4KICAgIGJyYW5jaD0kKGNvbW1hbmQgZ2l0IHN5bWJvbGljLXJlZiAtLXNob3J0IEhFQUQgMj4vZGV2L251bGwgfHwgY29tbWFuZCBnaXQgcmV2LXBhcnNlIC0tc2hvcnQgSEVBRCAyPi9kZXYvbnVsbCkKICAgIGNvbW1hbmQgZ2l0IGRpZmYgLS1xdWlldCAmPi9kZXYvbnVsbCAmJiBjb21tYW5kIGdpdCBkaWZmIC0tY2FjaGVkIC0tcXVpZXQgJj4vZGV2L251bGwgfHwgZGlydHk9dHJ1ZQogIGZpCiAgIyBIYW5kLWJ1aWx0IEpTT04gKG5vIGpxKTsgZXNjYXBlIGJhY2tzbGFzaCB0aGVuIGRvdWJsZS1xdW90ZSBpbiBwd2QuCiAgbG9jYWwgZXNjPSIke3B3ZC8vXFwvXFxcXH0iOyBlc2M9IiR7ZXNjLy9cIi9cXFwifSIKICBsb2NhbCBqc29uPSJ7XCJwd2RcIjpcIiR7ZXNjfVwiLFwiZXhpdENvZGVcIjoke2NvZGV9IgogIGlmIFtbIC1uICIkYnJhbmNoIiBdXTsgdGhlbgogICAgbG9jYWwgYmVzYz0iJHticmFuY2gvL1xcL1xcXFx9IjsgYmVzYz0iJHtiZXNjLy9cIi9cXFwifSIKICAgIGpzb24rPSIsXCJnaXRCcmFuY2hcIjpcIiR7YmVzY31cIixcImdpdERpcnR5XCI6JHtkaXJ0eX0iCiAgZmkKICBqc29uKz0ifSIKICBwcmludGYgJ1xlXTEzMztBJXNcZVxcJyAiJGpzb24iCn0KCl9kYWltb25fcmVtb3RlX3ByZWV4ZWMoKSB7IHByaW50ZiAnXGVdMTMzO0NcZVxcJzsgfQoKcHJlY21kX2Z1bmN0aW9ucys9KF9kYWltb25fcmVtb3RlX3ByZWNtZCkKcHJlZXhlY19mdW5jdGlvbnMrPShfZGFpbW9uX3JlbW90ZV9wcmVleGVjKQoKIyBNaW5pbWFsIHByb21wdCDigJQgZGFpbW9uIHJlbmRlcnMgaXRzIG93biBjaHJvbWUuClBST01QVD0nICcKUlBST01QVD0nJwp1bnNldG9wdCBQUk9NUFRfQ1IgUFJPTVBUX1NQIDI+L2Rldi9udWxsIHx8IHRydWUK";
+
+// Injected as one line, no temp files: decode the bootstrap and source it into the
+// remote zsh. Leading space keeps it out of remote history (HIST_IGNORE_SPACE).
+const WARPIFY_INJECT = ` printf %s ${WARPIFY_PAYLOAD_B64} | base64 -d | source /dev/stdin\n`;
+
+// Warpify state: set once the remote shell accepts the bootstrap (markers flowing).
+function notifyWarpify(tabId: string, active: boolean) {
+  inWarpifiedMap.set(tabId, active);
+}
+
+// Standing exit listener: a warpified SSH session ends when its PTY dies (remote `exit`).
+// run()'s per-command subscriptions are transient, so clear warpify/streaming state here
+// — otherwise a dead remote session would mis-route the next (now local) command.
+shell.onExit((tabId) => {
+  if (inWarpifiedMap.get(tabId) || inStreamingSessionMap.get(tabId)) {
+    inStreamingSessionMap.delete(tabId);
+    notifyWarpify(tabId, false);
+  }
+});
+
+// Active run cleanups — lets cancel button force-abandon a stuck run. Keyed per run id so a
+// newer run can't orphan an older hung one (each run registers its own cleanup).
+const activeCleanups = new Map<string, (opts?: { cancelled?: boolean }) => void>();
 export function abandonRun(tabId: string) {
-  activeCleanups.get(tabId)?.();
+  activeCleanups.get(tabId)?.({ cancelled: true });
 }
 
 // Apply backspace
@@ -207,7 +241,22 @@ function stripPromptLines(text: string): string {
   return text.split("\n").filter((l) => !PROMPT_RE.test(ANSI(l).trim())).join("\n").trim();
 }
 
+// OSC 1337 imgcat: ESC ] 1337 ; File=inline=1[;...] : <base64> BEL
+const OSC1337_RE = /\x1b\]1337;File=[^\x07\x1b]*:([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)/g;
+
 function parse(rawText: string): Out[] {
+  // Extract OSC 1337 imgcat sequences before any stripping
+  const imgOuts: Out[] = [];
+  const textWithoutImgs = rawText.replace(OSC1337_RE, (_, b64: string) => {
+    imgOuts.push({ kind: "image", src: `data:image/png;base64,${b64}` });
+    return "";
+  });
+  if (imgOuts.length > 0) {
+    // Parse the remaining text too and combine
+    const rest = parse(textWithoutImgs);
+    return [...imgOuts, ...rest];
+  }
+
   const cleaned = rawText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   if (hasColor(cleaned)) {
     const stripped = ANSI(cleaned).trim();
@@ -269,7 +318,7 @@ function parse(rawText: string): Out[] {
         perms: m[1]!, links: m[2]!, user: m[3]!, group: m[4]!,
         size: parseInt(m[5]!, 10), month: m[6]!, day: m[7]!, time: m[8]!,
         name: arrowIdx >= 0 ? nameRaw.slice(0, arrowIdx) : nameRaw,
-        link: arrowIdx >= 0 ? nameRaw.slice(arrowIdx + 4) : undefined,
+        ...(arrowIdx >= 0 ? { link: nameRaw.slice(arrowIdx + 4) } : {}),
       };
     });
     return [{ kind: "lslong", entries, total }];
@@ -365,6 +414,26 @@ function parse(rawText: string): Out[] {
     }
   }
   return [{ kind: "lines", lines }];
+}
+
+// Notification config — call setNotifConfig() from the UI to configure
+let notifEnabled = true;
+let notifThreshold = 10_000;
+
+export function setNotifConfig(enabled: boolean, thresholdMs: number) {
+  notifEnabled = enabled;
+  notifThreshold = thresholdMs;
+  if (enabled && Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
+function maybeNotify(cmd: string, ms: number) {
+  if (!notifEnabled) return;
+  if (ms < notifThreshold) return;
+  if (!document.hidden) return;
+  if (Notification.permission !== "granted") return;
+  new Notification("daimon", { body: `${cmd} — ${Math.round(ms / 1000)}s`, icon: "/favicon.ico" });
 }
 
 let globalOutputOff: (() => void) | null = null;
@@ -531,13 +600,36 @@ export async function run(
   let done = false;
   let commandWritten = false;
   let commandStarted = false;
+  // Warpify (ssh only): quiet-period debounce → inject OSC 133 bootstrap → confirm on first remote Prompt.
+  // ponytail: timing heuristic. Ceiling: a slow link or a >600ms-gapped MOTD banner can
+  // trip the injection early; the retry + marker-confirm cover the common cases. Swap to a
+  // sentinel probe only if real hosts prove flaky.
+  let warpInjectTimer: ReturnType<typeof setTimeout> | null = null;
+  let warpRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let warpInjected = false;
+  const injectWarpify = () => {
+    if (done || warpInjected) return;
+    warpInjected = true;
+    shell.write(tabId, WARPIFY_INJECT).catch(() => {});
+    // If no remote marker confirms within 1.5s, try once more, then give up (stays raw).
+    warpRetryTimer = setTimeout(() => {
+      if (done || isWarpified(tabId)) return;
+      shell.write(tabId, WARPIFY_INJECT).catch(() => {});
+    }, 1500);
+  };
+  const armWarpifyInject = () => {
+    if (warpInjected) return;
+    if (warpInjectTimer) clearTimeout(warpInjectTimer);
+    warpInjectTimer = setTimeout(injectWarpify, 600);
+  };
   const emitProgress = () => {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       if (done) return;
       const stripped = stripPromptLines(stripEcho(ANSI(normalBuf).trim(), effectiveInput));
       const forParse = stripPromptLines(stripEcho(normalBuf, effectiveInput));
-      onProgress({ ...pendingBlock, ms: Date.now() - t0, out: stripped ? parse(forParse) : [], pending: true });
+      const hasImg = /\x1b\]1337;File=/.test(forParse);
+      onProgress({ ...pendingBlock, ms: Date.now() - t0, out: (stripped || hasImg) ? parse(forParse) : [], pending: true });
     }, 80);
   };
 
@@ -556,6 +648,8 @@ export async function run(
       if (isStreamingInteractive) {
         normalBuf += cleanData;
         emitProgress();
+        // ssh: once the remote shell settles (quiet period), push the warpify bootstrap.
+        if (!isWarpified(tabId)) armWarpifyInject();
         return;
       }
       // Auto-detect TUI: first cursor-up / erase-line / hide-cursor / alt-screen → inline block rendering
@@ -589,6 +683,19 @@ export async function run(
     globalContextOff = shell.onContext((tid, ctx) => {
       if (tid !== tabId) return;
       if (!commandWritten) return;
+      // ssh connection block: the first remote OSC 133;A confirms the bootstrap took.
+      // Flip the session to warpified, then resolve THIS block as a finished "connected"
+      // marker. The live SSH channel is the PTY itself; each later remote command gets
+      // its own run()/block. We must resolve here because the next run() replaces the
+      // module-level exit/output subscriptions, so this promise would otherwise hang.
+      if (isStreamingInteractive) {
+        if (!isWarpified(tabId)) {
+          notifyWarpify(tabId, true);
+          finalCtx = ctx;
+          cleanup({ keepSession: true });
+        }
+        return;
+      }
       if (!commandStarted) return; // ignore startup precmd prompt — wait for real command
       finalCtx = ctx;
       // Stop buffering immediately — the prompt line arrives after context and
@@ -599,11 +706,15 @@ export async function run(
       setTimeout(cleanup, 100);
     });
 
-    function cleanup() {
+    function cleanup(opts?: { keepSession?: boolean; cancelled?: boolean }) {
+      const keepSession = opts?.keepSession === true;
+      const cancelled = opts?.cancelled === true;
       if (done) return;
       done = true;
       activeCleanups.delete(tabId);
       if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+      if (warpInjectTimer) { clearTimeout(warpInjectTimer); warpInjectTimer = null; }
+      if (warpRetryTimer) { clearTimeout(warpRetryTimer); warpRetryTimer = null; }
       globalOutputOff?.(); globalOutputOff = null;
       globalContextOff?.(); globalContextOff = null;
       globalExitOff?.(); globalExitOff = null;
@@ -612,14 +723,18 @@ export async function run(
 
       if (isInteractive || detectedTUI) {
         notifyTui(tabId, false);
-        notifyAltScreen(tabId, false);
+        if (isInteractive) notifyAltScreen(tabId, false);
       }
-      if (isStreamingInteractive) inStreamingSessionMap.delete(tabId);
+      // keepSession: warpify-confirm resolve — leave ssh streaming+warpified state set so
+      // later remote commands keep routing as blocks over the same live PTY.
+      if (isStreamingInteractive && !keepSession) { inStreamingSessionMap.delete(tabId); notifyWarpify(tabId, false); }
 
       const ms = Date.now() - t0;
+      maybeNotify(input, ms);
       const stripped = stripPromptLines(stripEcho(ANSI(normalBuf).trim(), effectiveInput));
       const forParse = stripPromptLines(stripEcho(normalBuf, effectiveInput));
-      const out = stripped ? parse(forParse) : [];
+      const hasImg = /\x1b\]1337;File=/.test(forParse);
+      const out = (stripped || hasImg) ? parse(forParse) : [];
 
       const gb = finalCtx?.gitBranch ?? state.gitBranch;
       const nextState: State = {
@@ -631,10 +746,18 @@ export async function run(
       const rawCode = finalCtx?.exitCode ?? exitCode;
       // Signal exits from TUI apps are clean exits (130=Ctrl-C, 141=SIGPIPE, 143=SIGTERM)
       const cmdCode = (rawCode === 130 || rawCode === 141 || rawCode === 143) ? 0 : rawCode;
+      // A command is "cancelled" if the user abandoned it, or it exited via SIGINT (130) — show a
+      // clear marker instead of leaving a bare "^C" in the output or a silent empty block.
+      const wasCancelled = cancelled || rawCode === 130;
+      const cancelledOut: Out[] = wasCancelled
+        ? [{ kind: "lines", lines: ["✕ cancelled"], tone: "bad" }]
+        : [];
       const finalBlock: Block = {
-        ...pendingBlock, ms, code: cmdCode,
+        ...pendingBlock, ms, code: wasCancelled ? 130 : cmdCode,
         ctx: finalCtx?.k8sContext ?? state.ctx.name,
-        out: out.length ? out : (cmdCode !== 0 && !detectedTUI) ? [{ kind: "lines", lines: ["(no output)"], tone: "muted" }] : [],
+        out: wasCancelled
+          ? [...out, ...cancelledOut]
+          : (out.length ? out : (cmdCode !== 0 && !detectedTUI) ? [{ kind: "lines", lines: ["(no output)"], tone: "muted" }] : []),
         pending: false,
       };
       resolve({ block: finalBlock, next: nextState });

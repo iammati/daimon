@@ -1,13 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast, Toaster } from "sonner";
-import { PlusIcon, XIcon, SunIcon, ZapIcon, PanelLeftIcon, GitBranchIcon, SearchIcon, EyeOffIcon, EyeIcon } from "lucide-react";
+import { PlusIcon, XIcon, SunIcon, ZapIcon, PanelLeftIcon, GitBranchIcon, SearchIcon, EyeOffIcon, EyeIcon, SplitSquareHorizontalIcon, ArrowUpRightIcon, LinkIcon } from "lucide-react";
 import { BlockView, PresentationModeContext } from "@/components/daimon/BlockView";
 import { Composer } from "@/components/daimon/Composer";
 import { HistoryPanel } from "@/components/daimon/HistoryPanel";
 import { ContextSwitcher } from "@/components/daimon/ContextSwitcher";
 import { XTermPanel, type XTermHandle } from "@/components/daimon/XTermPanel";
-import { run, sendRaw, resizePty, notifyAltScreen, onAltScreenChange, onTuiChange, STREAMING_INTERACTIVE_RE, isStreamingSession, abandonRun, type Block, type State } from "@/lib/daimon/shell";
+import { run, sendRaw, resizePty, notifyAltScreen, onAltScreenChange, onTuiChange, STREAMING_INTERACTIVE_RE, isStreamingSession, isWarpified, abandonRun, setNotifConfig, type Block, type State } from "@/lib/daimon/shell";
 import { shell } from "@/lib/daimon/rpc";
 import { displayPath } from "@/lib/daimon/world";
 import kubernetesIcon from "@/assets/kubernetes-icon.svg";
@@ -15,8 +15,9 @@ import { LandingPage } from "@/components/daimon/LandingPage";
 import { CommandPalette } from "@/components/daimon/CommandPalette";
 import { GlobalSearch } from "@/components/daimon/GlobalSearch";
 import { HeaderExtensionSlot, OpenStackBadge } from "@/components/daimon/HeaderExtension";
-
-const TITLE = "daimon — a terminal for Converged Cloud operators";
+import { KeyboardShortcutsModal } from "@/components/daimon/KeyboardShortcutsModal";
+import { SettingsModal } from "@/components/daimon/SettingsModal";
+import { PowerlineStatus } from "@/components/daimon/PowerlineStatus";const TITLE = "daimon — a terminal for Converged Cloud operators";
 const DESC =
   "daimon is a light, block-based terminal: ghost autocomplete, folder-aware suggestions, and a kube context switcher built for Converged Cloud regions.";
 
@@ -43,10 +44,12 @@ type Session = {
   id: string;
   customName?: string;
   lastCmd?: string;
+  draft?: string;
   state: State;
   blocks: Block[];
   history: string[];
   historyTs: number[];
+  splitId?: string;
 };
 
 let nextSessionNum = 1;
@@ -69,6 +72,11 @@ function sessionLabel(s: Session): string {
   return s.customName ?? s.lastCmd ?? "New session";
 }
 
+function removeSplit(s: Session): Session {
+  const { splitId: _, ...rest } = s;
+  return rest as Session;
+}
+
 type Theme = "light" | "dracula";
 
 function applyTheme(t: Theme) {
@@ -89,7 +97,7 @@ function highlight(text: string, query: string): React.ReactNode {
   return (
     <>
       {text.slice(0, idx)}
-      <mark className="bg-signal/20 text-signal rounded-[2px] not-italic">{text.slice(idx, idx + query.length)}</mark>
+      <mark className="bg-signal/20 text-signal not-italic">{text.slice(idx, idx + query.length)}</mark>
       {text.slice(idx + query.length)}
     </>
   );
@@ -132,6 +140,12 @@ function blockOutputText(b: Block): string {
 function Daimon() {
   const [sessions, setSessions] = useState<Session[]>(() => [makeSession()]);
   const [activeId, setActiveId] = useState(() => sessions[0]!.id);
+  const active = sessions.find((s) => s.id === activeId) ?? sessions[0]!;
+  // Split children are not top-level tabs
+  const splitChildIds = new Set(sessions.flatMap((s) => s.splitId ? [s.splitId] : []));
+  const topLevelSessions = sessions.filter((s) => !splitChildIds.has(s.id));
+  // Split pane: scoped to the active session via session.splitId
+  const splitSessionId = active.splitId ?? null;
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const renameRef = useRef<HTMLInputElement>(null);
   // Per-session xterm handles (kept for potential future use) and TUI block tracking
@@ -140,21 +154,27 @@ function Daimon() {
   const [tuiBlockIds, setTuiBlockIds] = useState<Map<string, string>>(new Map());
   const [altScreenActive, setAltScreenActive] = useState(false);
   const [presentationMode, setPresentationMode] = useState(false);
-  const togglePresentation = () => setPresentationMode((p) => {
-    toast(!p ? "Presentation mode on — secrets redacted" : "Presentation mode off", { duration: 2500 });
-    return !p;
-  });
+  // Toast outside the state updater — updaters can run twice (StrictMode / batching), which would
+  // fire the toast twice. Derive the next value from current state here instead.
+  const togglePresentation = () => {
+    setPresentationMode((p) => !p);
+    toast(!presentationMode ? "Presentation mode on — secrets redacted" : "Presentation mode off", { duration: 2500, id: "presentation-mode" });
+  };
   const [theme, setTheme] = useState<Theme>("light");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [gitDirty, setGitDirty] = useState(false);
   const [gitAhead, setGitAhead] = useState(0);
   const [gitBehind, setGitBehind] = useState(0);
+  const [gitAdded, setGitAdded] = useState(0);
+  const [gitRemoved, setGitRemoved] = useState(0);
   const [osRegion, setOsRegion] = useState<string | null>(null);
   const [osProject, setOsProject] = useState<string | null>(null);
   const [osDomain, setOsDomain] = useState<string | null>(null);
   const [k8sContext, setK8sContext] = useState<string | null>(null);
   const [k8sNamespace, setK8sNamespace] = useState<string | null>(null);
+  const [showBadges, setShowBadges] = useState(true);
+  const [showPowerline, setShowPowerline] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [ctxSwitcherOpen, setCtxSwitcherOpen] = useState(0);
@@ -165,6 +185,8 @@ function Daimon() {
   const [searchQuery, setSearchQuery] = useState("");
   const [pagerActive, setPagerActive] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [keysModalOpen, setKeysModalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchResults, setSearchResults] = useState<{blockId: string; blockInput: string; snippet: string}[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const blockRefsMap = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -176,41 +198,86 @@ function Daimon() {
     const saved = localStorage.getItem("daimon-font-size");
     return saved ? parseInt(saved, 10) : 13;
   });
+  const [splitRatio, setSplitRatio] = useState(0.5);
+  const splitDragging = useRef(false);
+  // Which pane currently has keyboard focus (affects composer focus, git status display)
+  const [focusedPane, setFocusedPane] = useState<"left" | "right">("left");
 
   useEffect(() => { applyTheme(theme); }, [theme]);
   useEffect(() => { localStorage.setItem("daimon-font-size", String(fontSize)); }, [fontSize]);
 
   // Load persisted data from DB on mount
   useEffect(() => {
-    const sid = sessions[0]!.id;
     Promise.all([
-      shell.historyList(2000),
-      shell.blockList(sid, 500),
+      shell.historyList(),
       shell.prefGet("theme"),
-    ]).then(([histEntries, blockRows, savedTheme]) => {
+      shell.prefGet("sessions"),
+      shell.prefGet("notif-enabled"),
+      shell.prefGet("notif-threshold"),
+      shell.prefGet("show-badges"),
+      shell.prefGet("show-powerline"),
+    ]).then(async ([histEntries, savedTheme, savedSessionsJson, notifEnabledPref, notifThresholdPref, badgesPref, powerlinePref]) => {
       // History: sorted oldest-first for array index stability
       const sorted = [...histEntries].sort((a, b) => a.ts - b.ts);
       const history = sorted.map(e => e.cmd);
       const historyTs = sorted.map(e => e.ts);
 
-      // Blocks: decode output_json back to Block shape
-      const blocks: import("@/lib/daimon/shell").Block[] = blockRows.map(r => ({
-        id: r.id,
-        input: r.input,
-        cwd: r.cwd.split("/").filter(Boolean),
-        ctx: r.ctx,
-        at: new Date(r.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-        ms: 0,
-        code: r.exit_code,
-        out: (() => { try { return JSON.parse(r.output_json); } catch { return []; } })(),
-        pending: false,
-      }));
+      // Restore saved sessions if any
+      type SavedSession = { id: string; customName?: string; lastCmd?: string; state?: { cwd: string[]; ctx: { name: string } } };
+      let savedSessions: SavedSession[] = [];
+      try { if (savedSessionsJson) savedSessions = JSON.parse(savedSessionsJson); } catch { /**/ }
 
-      setSessions(prev => prev.map((s, i) => i === 0 ? { ...s, history, historyTs, blocks } : s));
+      // Decode block rows → Block[]
+      const decodeBlocks = (rows: { id: string; session_id: string; input: string; cwd: string; ctx: string; ts: number; exit_code: number; output_json: string }[]) =>
+        rows.map(r => ({
+          id: r.id,
+          input: r.input,
+          cwd: r.cwd.split("/").filter(Boolean),
+          ctx: r.ctx,
+          at: new Date(r.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          ms: 0,
+          code: r.exit_code,
+          out: (() => { try { return JSON.parse(r.output_json); } catch { return []; } })(),
+          pending: false,
+        }));
+
+      if (savedSessions.length > 0) {
+        // Restore each saved session and load its blocks in parallel
+        const sessionsWithBlocks = await Promise.all(savedSessions.map(async (saved) => {
+          const blockRows = await shell.blockList(saved.id, 500).catch(() => []);
+          const blocks = decodeBlocks(blockRows);
+          const s: Session = {
+            id: saved.id,
+            state: saved.state ?? START,
+            blocks,
+            history,
+            historyTs,
+          };
+          if (saved.customName) s.customName = saved.customName;
+          if (saved.lastCmd) s.lastCmd = saved.lastCmd;
+          return s;
+        }));
+        setSessions(sessionsWithBlocks);
+        setActiveId(sessionsWithBlocks[0]!.id);
+      } else {
+        // First launch: load blocks for the default session
+        const sid = sessions[0]!.id;
+        const blockRows = await shell.blockList(sid, 500).catch(() => []);
+        const blocks = decodeBlocks(blockRows);
+        setSessions(prev => prev.map((s, i) => i === 0 ? { ...s, history, historyTs, blocks } : s));
+      }
 
       if (savedTheme === "dracula" || savedTheme === "light") {
         setTheme(savedTheme as Theme);
       }
+      // Init notification config from persisted prefs
+      setNotifConfig(
+        notifEnabledPref !== "false",
+        notifThresholdPref ? parseInt(notifThresholdPref, 10) : 10_000,
+      );
+      // Context display prefs (badges default on, powerline default off)
+      setShowBadges(badgesPref !== "0");
+      setShowPowerline(powerlinePref === "1");
       // One-time cleanup of old localStorage keys
       try {
         localStorage.removeItem("daimon-history-v1");
@@ -222,6 +289,17 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Persist sessions metadata (not blocks — those save individually) on change
+  useEffect(() => {
+    const toSave = sessions.map(s => ({
+      id: s.id,
+      customName: s.customName,
+      lastCmd: s.lastCmd,
+      state: s.state,
+    }));
+    shell.prefSet("sessions", JSON.stringify(toSave)).catch(() => {});
+  }, [sessions]);
+
   // Track git branch from shell context updates
   useEffect(() => {
     const off = shell.onContext((_tabId, ctx) => {
@@ -229,6 +307,8 @@ function Daimon() {
       if (ctx.gitDirty !== undefined) setGitDirty(!!ctx.gitDirty);
       if (ctx.gitAhead !== undefined) setGitAhead(Number(ctx.gitAhead) || 0);
       if (ctx.gitBehind !== undefined) setGitBehind(Number(ctx.gitBehind) || 0);
+      if (ctx.gitAdded !== undefined) setGitAdded(Number(ctx.gitAdded) || 0);
+      if (ctx.gitRemoved !== undefined) setGitRemoved(Number(ctx.gitRemoved) || 0);
       if (ctx.region !== undefined) setOsRegion(ctx.region || null);
       if (ctx.project !== undefined) setOsProject(ctx.project || null);
       if (ctx.domain !== undefined) setOsDomain(ctx.domain || null);
@@ -245,26 +325,25 @@ function Daimon() {
     shell.prefSet("theme", next).catch(() => {});
   };
 
-  const active = sessions.find((s) => s.id === activeId) ?? sessions[0]!;
   const cmdDisabled = active.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input));
   const cmdPrompting = cmdDisabled && active.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input) && isPromptingForInput(b));
   const hideBottomBar = altScreenActive || tuiBlockIds.has(activeId) || pagerActive;
   const effectiveHoveredBlockId = pagerActive ? null : hoveredBlockId;
   const effectiveBlockModActive = pagerActive ? false : blockModActive;
 
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollContainersRef = useRef<Map<string, HTMLDivElement>>(new Map());
   const atBottomRef = useRef(true);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = (sessionId?: string) => {
     requestAnimationFrame(() => {
-      const container = scrollRef.current;
+      const container = scrollContainersRef.current.get(sessionId ?? activeId);
       if (!container) return;
       container.scrollTop = container.scrollHeight;
     });
   };
 
   const isAtBottom = () => {
-    const el = scrollRef.current;
+    const el = scrollContainersRef.current.get(activeId);
     if (!el) return true;
     return el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
   };
@@ -332,13 +411,21 @@ function Daimon() {
     });
   };
 
-  const focusComposer = () => window.dispatchEvent(new CustomEvent("focus-composer"));
+  const focusComposer = (sessionId?: string) =>
+    window.dispatchEvent(new CustomEvent("focus-composer", { detail: sessionId ? { sessionId } : undefined }));
 
   useEffect(() => { focusComposer(); }, [activeId]);
 
+  // When focused pane changes, focus that pane's composer
   useEffect(() => {
-    window.addEventListener("focus", focusComposer);
-    return () => window.removeEventListener("focus", focusComposer);
+    const sid = focusedPane === "right" && splitSessionId ? splitSessionId : activeId;
+    focusComposer(sid);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedPane, splitSessionId]);
+
+  useEffect(() => {
+    window.addEventListener("focus", () => focusComposer());
+    return () => window.removeEventListener("focus", () => focusComposer());
   }, []);
 
   useEffect(() => {
@@ -382,8 +469,12 @@ function Daimon() {
       if (e.key === "-") { e.preventDefault(); setFontSize(s => Math.max(s - 1, 10)); return; }
       if (e.key === "k") {
         e.preventDefault();
-        shell.blockClear(activeId).catch(() => {});
-        updateSession(activeId, { blocks: [] });
+        setKeysModalOpen(true);
+        return;
+      }
+      if (e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen(true);
         return;
       }
       if (e.key === "b") {
@@ -413,6 +504,24 @@ function Daimon() {
         newTab();
         return;
       }
+      if (e.key === "d" || e.key === "D") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          // ⌘⇧D — close split
+          setSessions((prev) => prev.map((s) => s.id === activeId ? removeSplit(s) : s));
+          setFocusedPane("left");
+        } else {
+          // ⌘D — open split or toggle pane focus
+          if (!splitSessionId) {
+            const s = makeSession();
+            setSessions((prev) => [...prev, s].map((x) => x.id === activeId ? { ...x, splitId: s.id } : x));
+            setFocusedPane("right");
+          } else {
+            setFocusedPane((p) => p === "left" ? "right" : "left");
+          }
+        }
+        return;
+      }
       if (e.key === "w") {
         e.preventDefault();
         closeTab(activeId);
@@ -420,8 +529,8 @@ function Daimon() {
       }
       if (e.key >= "1" && e.key <= "9") {
         const idx = parseInt(e.key) - 1;
-        const target = sessions[idx];
-        if (target) { e.preventDefault(); setActiveId(target.id); }
+        const target = topLevelSessions[idx];
+        if (target) { e.preventDefault(); setActiveId(target.id); setFocusedPane("left"); }
         return;
       }
       if (e.key === "c") {
@@ -462,8 +571,9 @@ function Daimon() {
   useEffect(() => {
     const onDown = (e: KeyboardEvent) => {
       const mod = (e.metaKey || e.ctrlKey) && e.shiftKey;
-      if (mod && !blockModRef.current) { blockModRef.current = true; if (!pagerActive) setBlockModActive(true); }
-      if (!mod || !hoveredBlockId || pagerActive) return;
+      const tuiActive = altScreenActive || tuiBlockIds.has(activeId);
+      if (mod && !blockModRef.current) { blockModRef.current = true; if (!pagerActive && !tuiActive) setBlockModActive(true); }
+      if (!mod || !hoveredBlockId || pagerActive || tuiActive) return;
       const block = active.blocks.find(b => b.id === hoveredBlockId);
       if (!block) return;
       const key = e.key.toUpperCase();
@@ -490,35 +600,59 @@ function Daimon() {
     window.addEventListener("keyup", onUp);
     return () => { window.removeEventListener("keydown", onDown); window.removeEventListener("keyup", onUp); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hoveredBlockId, active.blocks]);
+  }, [hoveredBlockId, active.blocks, altScreenActive, tuiBlockIds]);
 
   const handleScroll = () => {
     atBottomRef.current = isAtBottom();
     if (atBottomRef.current) toast.dismiss("new-output");
   };
 
-  const submit = async (cmd: string) => {
-    const sessionId = activeId;
+  const onSplitDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    splitDragging.current = true;
+    const onMove = (ev: MouseEvent) => {
+      const main = (e.target as HTMLElement).closest("[data-split-root]") as HTMLElement | null;
+      if (!main) return;
+      const rect = main.getBoundingClientRect();
+      const ratio = Math.min(0.8, Math.max(0.2, (ev.clientX - rect.left) / rect.width));
+      setSplitRatio(ratio);
+    };
+    const onUp = () => {
+      splitDragging.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const submit = async (cmd: string, forSessionId?: string) => {
+    const sessionId = forSessionId ?? activeId;
+    const sess = sessions.find((s) => s.id === sessionId) ?? sessions[0]!;
     atBottomRef.current = true;
 
     // If a streaming-interactive session (ssh/mosh) is active, forward input to PTY directly.
     // Check module-level map — immune to React stale closure.
-    if (isStreamingSession(sessionId)) {
+    // Exception: once the session is warpified (remote shell emits OSC 133), fall through
+    // to the normal run() block path so each remote command renders as its own block.
+    if (isStreamingSession(sessionId) && !isWarpified(sessionId)) {
       sendRaw(sessionId, cmd + "\n");
       return;
     }
 
     // Legacy stale-closure fallback (belt-and-suspenders)
-    const pendingStreamBlock = active.blocks.find(
+    const pendingStreamBlock = sess.blocks.find(
       (b) => b.pending && STREAMING_INTERACTIVE_RE.test(b.input)
     );
-    if (pendingStreamBlock) {
+    if (pendingStreamBlock && !isWarpified(sessionId)) {
       sendRaw(sessionId, cmd + "\n");
       return;
     }
 
-    // Any pending command (e.g. Y/n prompt, password, script input) — forward as stdin
-    if (active.blocks.some((b) => b.pending)) {
+    // Any pending command (e.g. Y/n prompt, password, script input) — forward as stdin.
+    // Skip when warpified: the ssh connection block stays pending for the session's life,
+    // so remote commands must go through run() (block path), not raw stdin.
+    if (sess.blocks.some((b) => b.pending) && !isWarpified(sessionId)) {
       // Control characters (e.g. \x03 SIGINT) go raw without newline
       const isCtrl = cmd.length === 1 && cmd.charCodeAt(0) < 32;
       sendRaw(sessionId, isCtrl ? cmd : cmd + "\n");
@@ -526,10 +660,10 @@ function Daimon() {
       return;
     }
 
-    const isDup = active.history[active.history.length - 1] === cmd;
+    const isDup = sess.history[sess.history.length - 1] === cmd;
     const ts = Date.now();
-    const newHistory = isDup ? active.history : [...active.history, cmd];
-    const newHistoryTs = isDup ? active.historyTs : [...active.historyTs, ts];
+    const newHistory = isDup ? sess.history : [...sess.history, cmd];
+    const newHistoryTs = isDup ? sess.historyTs : [...sess.historyTs, ts];
     if (!isDup) shell.historyAdd(cmd, ts).catch(() => {});
     updateSession(sessionId, { history: newHistory, historyTs: newHistoryTs });
     const pendingId = Math.random().toString(36).slice(2);
@@ -538,13 +672,13 @@ function Daimon() {
       blocks: [...s.blocks, { id: pendingId, input: cmd, cwd: s.state.cwd, ctx: s.state.ctx.name, at: now(), ms: 0, code: 0, out: [], pending: true }],
     } : s));
 
-    const runPromise = run(cmd, active.state, sessionId, (updated) => {
+    const runPromise = run(cmd, sess.state, sessionId, (updated) => {
       setSessions((prev) => prev.map((s) => s.id === sessionId ? {
         ...s,
         blocks: s.blocks.map((x) => x.id === pendingId ? { ...updated, id: pendingId } : x),
       } : s));
     });
-    window.dispatchEvent(new CustomEvent("focus-composer"));
+    window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } }));
     const { block, next, clear } = await runPromise;
     setSessions((prev) => prev.map((s) => {
       if (s.id !== sessionId) return s;
@@ -566,11 +700,108 @@ function Daimon() {
       return { ...s, state: next, lastCmd: cmd, blocks: newBlocks };
     }));
     atBottomRef.current = true;
-    scrollToBottom();
-    setTimeout(() => window.dispatchEvent(new CustomEvent("focus-composer")), 1);
+    scrollToBottom(sessionId);
+    setTimeout(() => window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } })), 1);
   };
 
   const pickCtx = (name: string) => submit(`u8s set --context ${name} && u8s sync`);
+
+  const renderPane = (paneSessionId: string, isFocused: boolean) => {
+    const pane = sessions.find((s) => s.id === paneSessionId) ?? sessions[0]!;
+    const paneDisabled = pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input));
+    const panePrompting = paneDisabled && pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input) && isPromptingForInput(b));
+    const paneHideBar = (altScreenActive && paneSessionId === activeId) || tuiBlockIds.has(paneSessionId) || pagerActive;
+    return (
+      <>
+        <div
+          ref={(el) => {
+            if (el) scrollContainersRef.current.set(paneSessionId, el);
+            else scrollContainersRef.current.delete(paneSessionId);
+          }}
+          onScroll={isFocused ? handleScroll : undefined}
+          className={`flex-1 overflow-y-auto px-6 py-8${isFocused ? "" : " cursor-pointer"}`}
+          style={{ "--terminal-font-size": fontSize + "px" } as React.CSSProperties}
+          onClick={() => { if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); }}
+        >
+          <div className="w-full">
+            {pane.blocks.length === 0 ? (
+              <LandingPage
+                blocks={pane.blocks}
+                history={pane.history}
+                onResume={() => {}}
+                onCd={(path) => submit(`cd ${path}`, paneSessionId)}
+                onRun={(cmd) => submit(cmd, paneSessionId)}
+                onOpenPalette={() => setPaletteOpen(true)}
+              />
+            ) : (
+              <div className="divide-y divide-border/50">
+                {pane.blocks.map((b, i) => (
+                  <div
+                    key={b.id}
+                    ref={(el) => { if (el) blockRefsMap.current.set(b.id, el); else blockRefsMap.current.delete(b.id); }}
+                    className={`relative py-7 rounded-lg transition-all duration-100 ${effectiveHoveredBlockId === b.id && effectiveBlockModActive ? "outline outline-2 outline-dashed outline-signal/50 outline-offset-4 bg-signal/[0.03]" : ""}`}
+                    onMouseEnter={() => { if (!pagerActive) setHoveredBlockId(b.id); if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); }}
+                    onMouseLeave={() => setHoveredBlockId(null)}
+                  >
+                    <BlockView block={b} onRerun={(cmd) => submit(cmd, paneSessionId)} isLast={i === pane.blocks.length - 1} currentCtx={pane.state.ctx.name} sessionId={pane.id} isTuiActive={tuiBlockIds.get(pane.id) === b.id} promptingForInput={panePrompting && !!b.pending} onSearch={(q) => { setGlobalSearchQuery(q); setGlobalSearchOpen(true); }} onPathClick={(path) => { const expanded = path.startsWith("~") ? __HOME__ + path.slice(1) : path; const hasExt = /\.[^/]+$/.test(expanded.split("/").pop() ?? ""); const dir = hasExt ? expanded.split("/").slice(0, -1).join("/") || "/" : expanded; submit("cd " + JSON.stringify(dir), paneSessionId); toast("cd " + dir, { duration: 2000 }); }} />
+                    {effectiveHoveredBlockId === b.id && effectiveBlockModActive && (
+                      <div className="absolute top-2 right-2 flex items-center gap-1 rounded-md border border-signal/30 bg-card/90 px-2 py-1 backdrop-blur-sm shadow-sm">
+                        {[["C","copy all"],["I","cmd"],["O","output"],["R","re-run"]].map(([k, label]) => (
+                          <span key={k} className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
+                            <kbd className="rounded bg-signal/15 px-1 py-0.5 text-signal font-semibold">{k}</kbd>
+                            <span>{label}</span>
+                            {k !== "R" && <span className="text-border mx-0.5">·</span>}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div />
+          </div>
+        </div>
+        <div className={`sticky bottom-0 border-t border-border bg-background/80 backdrop-blur-xl${paneHideBar ? " hidden" : ""}`}>
+          {showPowerline && isFocused && (
+            <PowerlineStatus
+              k8sContext={k8sContext}
+              k8sNamespace={k8sNamespace}
+              osRegion={osRegion}
+              osProject={osProject}
+              osDomain={osDomain}
+              gitBranch={gitBranch}
+              gitDirty={gitDirty}
+              gitAdded={gitAdded}
+              gitRemoved={gitRemoved}
+            />
+          )}
+          <div className="px-6 py-3">
+            <div className="w-full">
+              <Composer
+                key={paneSessionId}
+                cwd={pane.state.cwd}
+                ctx={pane.state.ctx.name}
+                history={pane.history}
+                historyTs={pane.historyTs}
+                initialValue={pane.draft ?? ""}
+                onDraftChange={(v) => setSessions((prev) => prev.map((s) => s.id === paneSessionId ? { ...s, draft: v } : s))}
+                onSubmit={(cmd) => { if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); submit(cmd, paneSessionId); }}
+                gitBranch={isFocused ? gitBranch : null}
+                gitDirty={isFocused ? gitDirty : false}
+                gitAhead={isFocused ? gitAhead : 0}
+                gitBehind={isFocused ? gitBehind : 0}
+                sessionId={pane.id}
+                disabled={paneDisabled}
+                streamingActive={pane.blocks.some((b) => b.pending && STREAMING_INTERACTIVE_RE.test(b.input))}
+                promptingForInput={panePrompting}
+              />
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  };
 
   const searchBlocks = (query: string) => {
     if (!query) { setSearchResults([]); return; }
@@ -609,12 +840,14 @@ function Daimon() {
     setGlobalSearchLoading(true);
     const q = globalSearchQuery.toLowerCase();
     const t = setTimeout(() => {
-      shell.blockRecent(2000).then((rows) => {
-        const matches = rows
+      Promise.all([
+        shell.blockRecent(2000),
+        shell.historySearch(globalSearchQuery, 100),
+      ]).then(([rows, histRows]) => {
+        const blockMatches = rows
           .filter((r) => r.input.toLowerCase().includes(q) || r.output_json.toLowerCase().includes(q))
           .slice(0, 30)
           .map((r) => {
-            // Extract a short output snippet for display
             let output = "";
             try {
               const parsed: {kind: string; lines?: string[]; html?: string}[] = JSON.parse(r.output_json);
@@ -630,7 +863,16 @@ function Daimon() {
             } catch { /* ignore */ }
             return { input: r.input, cwd: r.cwd, ts: r.ts, exit_code: r.exit_code, output };
           });
-        setGlobalSearchResults(matches);
+
+        // Merge history results, dedup against block inputs, filter meta history commands
+        const blockInputs = new Set(blockMatches.map(r => r.input.toLowerCase()));
+        const histMatches = histRows
+          .filter(h => !/^history(\s|$)/.test(h.cmd) && !blockInputs.has(h.cmd.toLowerCase()))
+          .map(h => ({ input: h.cmd, cwd: "", ts: h.ts, exit_code: 0, output: "" }));
+
+        // Merge: blocks first (have output), then history-only entries; sort by ts desc
+        const merged = [...blockMatches, ...histMatches].sort((a, b) => b.ts - a.ts).slice(0, 50);
+        setGlobalSearchResults(merged);
         setGlobalSearchLoading(false);
       }).catch(() => setGlobalSearchLoading(false));
     }, 200);
@@ -646,7 +888,11 @@ function Daimon() {
       <aside className={`shrink-0 flex-col border-r border-border bg-sidebar lg:flex transition-all duration-200 overflow-hidden ${sidebarOpen ? "w-56" : "w-0 border-r-0"}`}>
         {/* Wordmark */}
         <div className="flex items-center justify-between px-5 pt-5 pb-4">
-          <span className="font-mono text-[15px] font-semibold tracking-tight text-sidebar-foreground">daimon</span>
+          <span className="flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-sidebar-foreground">
+            <span className="text-sidebar-foreground/40">›_</span>
+            daimon
+            <span className="text-amber">.</span>
+          </span>
           <div className="flex items-center gap-1">
             <button
               onClick={cycleTheme}
@@ -667,78 +913,157 @@ function Daimon() {
 
         {/* Sessions */}
         <div className="flex-1 overflow-y-auto px-3 pb-4">
-          <ul className="space-y-0.5">
-            {sessions.map((s) => (
-              <li key={s.id}>
-                <div
-                  onClick={() => { if (renamingId !== s.id) setActiveId(s.id); }}
-                  onDoubleClick={() => {
-                    setActiveId(s.id);
-                    setRenamingId(s.id);
-                    setTimeout(() => { renameRef.current?.select(); }, 0);
-                  }}
-                  className={`group/sess flex w-full items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer transition-colors ${
-                    s.id === activeId
-                      ? "bg-sidebar-accent text-sidebar-foreground"
-                      : "text-sidebar-foreground/60 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
-                  }`}
-                >
-                  <span className="shrink-0 flex items-center justify-center size-6 rounded bg-sidebar-foreground/10 font-mono text-[11px] text-sidebar-foreground/60">&gt;_</span>
-                  {renamingId === s.id ? (
-                    <input
-                      ref={renameRef}
-                      defaultValue={s.customName ?? s.lastCmd ?? ""}
-                      placeholder={s.lastCmd ?? "name…"}
-                      className="flex-1 min-w-0 bg-transparent font-mono text-[12px] text-sidebar-foreground outline-none"
-                      onBlur={(e) => {
-                        const v = e.target.value.trim();
-                        setSessions((prev) => prev.map((x) => {
-                          if (x.id !== s.id) return x;
-                          if (v) return { ...x, customName: v };
-                          const { customName: _, ...rest } = x;
-                          return rest as Session;
-                        }));
-                        setRenamingId(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") e.currentTarget.blur();
-                        if (e.key === "Escape") { e.currentTarget.value = s.customName ?? s.lastCmd ?? ""; e.currentTarget.blur(); }
-                        e.stopPropagation();
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                      autoFocus
-                    />
-                  ) : (
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <span className="font-mono text-[12px] truncate leading-tight">{sessionLabel(s)}</span>
-                      <span className="font-mono text-[10px] truncate leading-tight opacity-50">{displayPath(s.state.cwd)}</span>
-                    </div>
-                  )}
-                  {sessions.length > 1 && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); closeTab(s.id); }}
-                      className="rounded p-0.5 opacity-0 group-hover/sess:opacity-100 transition-opacity"
-                    >
-                      <XIcon className="size-2.5" />
-                    </button>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
+          <div className="px-2 pb-2 font-mono text-[11px] uppercase tracking-wider text-sidebar-foreground/40">
+            Sessions <span className="text-sidebar-foreground/25">/ {String(topLevelSessions.length).padStart(2, "0")}</span>
+          </div>
+          {(() => {
+            const topLevel = topLevelSessions;
+
+            const detachSplit = (parentId: string) => {
+              setSessions((prev) => prev.map((s) => s.id === parentId ? removeSplit(s) : s));
+              if (activeId === parentId) setFocusedPane("left");
+            };
+
+            const attachAsplit = (parentId: string, childId: string) => {
+              // childId becomes split pane of parentId; remove any existing split on parent first
+              setSessions((prev) => prev.map((s) => {
+                if (s.id === parentId) return { ...s, splitId: childId };
+                // if child was itself someone else's split, detach it
+                if (s.splitId === childId) return removeSplit(s);
+                return s;
+              }));
+              setActiveId(parentId);
+              setFocusedPane("right");
+            };
+
+            return (
+              <ul className="space-y-0.5">
+                {topLevel.map((s) => {
+                  const splitChild = s.splitId ? sessions.find((x) => x.id === s.splitId) : null;
+                  const isActive = s.id === activeId;
+                  // Sessions that could be attached as split (top-level, not already this session, no split of their own)
+                  const attachCandidates = topLevel.filter((c) => c.id !== s.id && !c.splitId && !splitChildIds.has(c.id) && c.id !== s.splitId);
+
+                  const sessionRow = (sess: typeof s, isParent: boolean) => {
+                    const sessIsActive = isActive && (isParent ? (!splitChild || focusedPane === "left") : focusedPane === "right");
+                    return (
+                      <div
+                        key={sess.id}
+                        onClick={() => {
+                          if (renamingId !== sess.id) {
+                            setActiveId(s.id);
+                            setFocusedPane(isParent ? "left" : "right");
+                          }
+                        }}
+                        onDoubleClick={() => {
+                          setActiveId(s.id);
+                          setFocusedPane(isParent ? "left" : "right");
+                          setRenamingId(sess.id);
+                          setTimeout(() => { renameRef.current?.select(); }, 0);
+                        }}
+                        className={`group/sess flex w-full items-center gap-2 border-l-2 px-2 py-1.5 cursor-pointer transition-colors ${
+                          sessIsActive
+                            ? "border-amber bg-sidebar-accent text-sidebar-foreground"
+                            : "border-transparent text-sidebar-foreground/60 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
+                        }`}
+                      >
+                        <span className="shrink-0 flex items-center justify-center size-6 rounded bg-sidebar-foreground/10 font-mono text-[11px] text-sidebar-foreground/60">
+                          {!isParent ? <SplitSquareHorizontalIcon className="size-3" /> : ">_"}
+                        </span>
+                        {renamingId === sess.id ? (
+                          <input
+                            ref={renameRef}
+                            defaultValue={sess.customName ?? sess.lastCmd ?? ""}
+                            placeholder={sess.lastCmd ?? "name…"}
+                            className="flex-1 min-w-0 bg-transparent font-mono text-[12px] text-sidebar-foreground outline-none"
+                            onBlur={(e) => {
+                              const v = e.target.value.trim();
+                              setSessions((prev) => prev.map((x) => {
+                                if (x.id !== sess.id) return x;
+                                if (v) return { ...x, customName: v };
+                                const { customName: _, ...rest } = x;
+                                return rest as Session;
+                              }));
+                              setRenamingId(null);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") e.currentTarget.blur();
+                              if (e.key === "Escape") { e.currentTarget.value = sess.customName ?? sess.lastCmd ?? ""; e.currentTarget.blur(); }
+                              e.stopPropagation();
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                            autoFocus
+                          />
+                        ) : (
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="font-mono text-[12px] truncate leading-tight">{sessionLabel(sess)}</span>
+                            <span className="font-mono text-[10px] truncate leading-tight opacity-50">{displayPath(sess.state.cwd)}</span>
+                          </div>
+                        )}
+                        <div className="flex items-center gap-0.5 opacity-0 group-hover/sess:opacity-100 transition-opacity">
+                          {isParent && !splitChild && attachCandidates.length > 0 && (
+                            <div className="relative group/attach">
+                              <button
+                                title="Attach a session as split pane"
+                                onClick={(e) => e.stopPropagation()}
+                                className="rounded p-0.5 hover:bg-sidebar-foreground/10"
+                              >
+                                <SplitSquareHorizontalIcon className="size-2.5" />
+                              </button>
+                              <div className="absolute left-full top-0 ml-1 hidden group-hover/attach:block z-50 min-w-[140px] border border-border bg-popover shadow-xl py-1">
+                                {attachCandidates.map((c) => (
+                                  <button
+                                    key={c.id}
+                                    onClick={(e) => { e.stopPropagation(); attachAsplit(s.id, c.id); }}
+                                    className="w-full px-3 py-1.5 text-left font-mono text-[11px] text-foreground/80 hover:bg-accent truncate"
+                                  >
+                                    {sessionLabel(c)}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {!isParent && (
+                            <button
+                              title="Detach to own tab"
+                              onClick={(e) => { e.stopPropagation(); detachSplit(s.id); }}
+                              className="rounded p-0.5 hover:bg-sidebar-foreground/10"
+                            >
+                              <ArrowUpRightIcon className="size-2.5" />
+                            </button>
+                          )}
+                          {isParent && sessions.length > 1 && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); closeTab(s.id); }}
+                              className="rounded p-0.5 hover:bg-sidebar-foreground/10"
+                            >
+                              <XIcon className="size-2.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  };
+
+                  return (
+                    <li key={s.id}>
+                      {splitChild ? (
+                        <div className={`border rounded-md overflow-hidden ${isActive ? "border-signal/25" : "border-border/50"}`}>
+                          {sessionRow(s, true)}
+                          <div className="border-t border-border/40" />
+                          {sessionRow(splitChild, false)}
+                        </div>
+                      ) : (
+                        sessionRow(s, true)
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            );
+          })()}
         </div>
 
-        {/* Footer keybinds */}
-        <div className="border-t border-sidebar-border px-4 py-3">
-          <dl className="space-y-1 font-mono text-[10px] text-sidebar-foreground/40">
-            {[["⌘K", "clear"], ["⌘T", "session"], ["⌘F", "search"], ["⌘H", "history"], ["⌘⇧P", "present"], ["Tab", "complete"]].map(([k, v]) => (
-              <div key={k} className="flex justify-between">
-                <dt>{v}</dt>
-                <dd className="rounded bg-sidebar-accent px-1 py-0.5 leading-none">{k}</dd>
-              </div>
-            ))}
-          </dl>
-        </div>
       </aside>
 
       {/* Main */}
@@ -804,10 +1129,15 @@ function Daimon() {
             <PanelLeftIcon className="size-4" />
           </button>
 
-          <HeaderExtensionSlot extensions={[<OpenStackBadge region={osRegion} project={osProject} domain={osDomain} />]} />
+          <span className="flex items-center gap-2 font-mono text-[13px] text-foreground">
+            {sessionLabel(active)}
+            <span className="text-muted-foreground/40">/</span>
+          </span>
 
-          {/* Kubernetes context widget — only when k8s context is set */}
-          {k8sContext && (
+          {showBadges && !showPowerline && <HeaderExtensionSlot extensions={[<OpenStackBadge region={osRegion} project={osProject} domain={osDomain} />]} />}
+
+          {/* Kubernetes context widget — only when k8s context is set. Hidden while powerline is on (powerline shows it instead). */}
+          {showBadges && !showPowerline && k8sContext && (
             <div className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/60 px-2.5 py-1">
               <img src={kubernetesIcon} alt="Kubernetes" className="size-3.5 shrink-0" />
               <div className="flex items-center gap-1.5 font-mono text-[11px]">
@@ -826,6 +1156,15 @@ function Daimon() {
             <span className="hidden font-mono text-[11px] tabular-nums text-muted-foreground sm:inline">
               {active.blocks.length} {active.blocks.length === 1 ? "run" : "runs"}
             </span>
+            {splitSessionId && (
+              <button
+                onClick={() => { setSessions((prev) => prev.map((s) => s.id === activeId ? removeSplit(s) : s)); setFocusedPane("left"); }}
+                title="Close split (⌘⇧D)"
+                className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              >
+                <XIcon className="size-4" />
+              </button>
+            )}
             <button
               onClick={togglePresentation}
               title={presentationMode ? "Presentation mode on (⌘⇧P)" : "Presentation mode off (⌘⇧P)"}
@@ -837,73 +1176,41 @@ function Daimon() {
           </div>
         </header>
 
-        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-6 py-8" style={{ "--terminal-font-size": fontSize + "px" } as React.CSSProperties}>
-          <div className="w-full">
-            {active.blocks.length === 0 ? (
-              <LandingPage
-                blocks={active.blocks}
-                onResume={() => {}}
-                onCd={(path) => submit(`cd ${path}`)}
-              />
-            ) : (
-              <div className="divide-y divide-border/50">
-                {active.blocks.map((b, i) => (
-                  <div
-                    key={b.id}
-                    ref={(el) => { if (el) blockRefsMap.current.set(b.id, el); else blockRefsMap.current.delete(b.id); }}
-                    className={`relative py-7 rounded-lg transition-all duration-100 ${effectiveHoveredBlockId === b.id && effectiveBlockModActive ? "outline outline-2 outline-dashed outline-signal/50 outline-offset-4 bg-signal/[0.03]" : ""}`}
-                    onMouseEnter={() => { if (!pagerActive) setHoveredBlockId(b.id); }}
-                    onMouseLeave={() => setHoveredBlockId(null)}
-                  >
-                    <BlockView block={b} onRerun={submit} isLast={i === active.blocks.length - 1} currentCtx={active.state.ctx.name} sessionId={active.id} isTuiActive={tuiBlockIds.get(active.id) === b.id} promptingForInput={cmdPrompting && !!b.pending} />
-                    {effectiveHoveredBlockId === b.id && effectiveBlockModActive && (
-                      <div className="absolute top-2 right-2 flex items-center gap-1 rounded-md border border-signal/30 bg-card/90 px-2 py-1 backdrop-blur-sm shadow-sm">
-                        {[["C","copy all"],["I","cmd"],["O","output"],["R","re-run"]].map(([k, label]) => (
-                          <span key={k} className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
-                            <kbd className="rounded bg-signal/15 px-1 py-0.5 text-signal font-semibold">{k}</kbd>
-                            <span>{label}</span>
-                            {k !== "R" && <span className="text-border mx-0.5">·</span>}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            <div />
+        {/* Panes */}
+        <div className="flex flex-1 overflow-hidden" data-split-root>
+          <div
+            data-pane={activeId}
+            className={`relative flex min-w-0 flex-col overflow-hidden transition-[flex] duration-300 ease-in-out${splitSessionId && focusedPane === "right" ? " opacity-70" : ""}`}
+            style={{ flex: splitSessionId ? splitRatio : 1 }}
+          >
+            {renderPane(activeId, focusedPane === "left" || !splitSessionId)}
           </div>
+          {splitSessionId && (
+            <>
+              {/* Drag handle */}
+              <div
+                className="group relative z-10 flex w-1 shrink-0 cursor-col-resize items-center justify-center bg-border/40 hover:bg-signal/40 transition-colors duration-150 select-none"
+                onMouseDown={onSplitDragStart}
+              >
+                <div className="h-8 w-0.5 rounded-full bg-border group-hover:bg-signal/60 transition-colors duration-150" />
+              </div>
+              <div data-pane={splitSessionId} className={`relative flex min-w-0 flex-col overflow-hidden animate-in slide-in-from-right-8 duration-300${focusedPane === "left" ? " opacity-70" : ""}`} style={{ flex: 1 - splitRatio }}>
+                {renderPane(splitSessionId, focusedPane === "right")}
+              </div>
+            </>
+          )}
         </div>
 
-        <div className={`sticky bottom-0 border-t border-border bg-background/80 backdrop-blur-xl${hideBottomBar ? " hidden" : ""}`}>
-          {historyOpen && (
+        {historyOpen && (
+          <div className="border-t border-border">
             <HistoryPanel
               history={active.history}
               historyTs={active.historyTs}
               onSelect={(cmd) => { setHistoryOpen(false); submit(cmd); }}
               onClose={() => setHistoryOpen(false)}
             />
-          )}
-          <div className="px-6 py-3">
-            <div className="w-full">
-              <Composer
-              cwd={active.state.cwd}
-              ctx={active.state.ctx.name}
-              history={active.history}
-              historyTs={active.historyTs}
-              onSubmit={submit}
-              gitBranch={gitBranch}
-              gitDirty={gitDirty}
-              gitAhead={gitAhead}
-              gitBehind={gitBehind}
-              sessionId={active.id}
-              disabled={cmdDisabled}
-              streamingActive={active.blocks.some((b) => b.pending && STREAMING_INTERACTIVE_RE.test(b.input))}
-              promptingForInput={cmdPrompting}
-            />
-            </div>
           </div>
-        </div>
+        )}
       </main>
 
       {/* per-session XTermPanels removed — all TUI now renders inline in BlockView */}
@@ -915,7 +1222,19 @@ function Daimon() {
         history={active.history}
         sessions={sessions.map((s) => ({ id: s.id, title: sessionLabel(s) }))}
         onSwitchSession={setActiveId}
+        commands={[
+          { id: "theme", label: "Toggle theme", description: theme === "light" ? "→ dracula" : "→ light", run: cycleTheme },
+          { id: "new-session", label: "New session", description: "⌘T", run: () => { setPaletteOpen(false); newTab(); } },
+          { id: "split", label: "Split pane", description: "⌘D", run: () => { setPaletteOpen(false); if (!splitSessionId) { const s = makeSession(); setSessions((prev) => [...prev, s].map((x) => x.id === activeId ? { ...x, splitId: s.id } : x)); setFocusedPane("right"); } else { setSessions((prev) => prev.map((s) => s.id === activeId ? removeSplit(s) : s)); setFocusedPane("left"); } } },
+          { id: "search", label: "Search blocks", description: "⌘F", run: () => { setPaletteOpen(false); setSearchOpen(true); } },
+          { id: "sidebar", label: "Toggle sidebar", description: "⌘B", run: () => { setPaletteOpen(false); document.dispatchEvent(new CustomEvent("toggle-sidebar")); } },
+          { id: "keys", label: "Keyboard shortcuts", description: "⌘K", run: () => { setPaletteOpen(false); setKeysModalOpen(true); } },
+          { id: "ssh", label: "Connect via SSH", description: "ssh host", run: () => { setPaletteOpen(false); window.dispatchEvent(new CustomEvent("prefill-composer", { detail: { text: "ssh " } })); } },
+          { id: "settings", label: "Settings", description: "⌘,", run: () => { setPaletteOpen(false); setSettingsOpen(true); } },
+        ]}
       />
+      <KeyboardShortcutsModal open={keysModalOpen} onClose={() => setKeysModalOpen(false)} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} onTheme={setTheme} fontSize={fontSize} onFontSize={setFontSize} showBadges={showBadges} onShowBadges={setShowBadges} showPowerline={showPowerline} onShowPowerline={setShowPowerline} />
     </div>
     </PresentationModeContext.Provider>
   );

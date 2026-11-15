@@ -70,6 +70,8 @@ pub enum ArgKind {
     GitRemote,
     /// Any remaining args (variadic).
     Rest,
+    /// Modified or untracked files in the working tree (for git add).
+    GitDirty,
 }
 
 impl Default for ArgKind {

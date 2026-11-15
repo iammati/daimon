@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useContext, createContext, useMemo, useCallback } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { createPortal } from "react-dom";
 import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
@@ -9,6 +10,7 @@ import type { Block, Out, LsEntry } from "@/lib/daimon/shell";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { ImageAddon } from "@xterm/addon-image";
 import "@xterm/xterm/css/xterm.css";
 import hljs from "highlight.js/lib/core";
 import hljsBash from "highlight.js/lib/languages/bash";
@@ -38,12 +40,33 @@ hljs.registerLanguage("css", hljsCss);
 hljs.registerLanguage("toml", hljsToml);
 
 export const PresentationModeContext = createContext(false);
+export const PagerContainerContext = createContext<HTMLElement | null>(null);
 
 // Patterns that look like secrets: API keys, tokens, passwords, JWTs, private keys
-const SECRET_RE = /(?:ghp_|gho_|github_pat_|xoxb-|xoxp-|sk-[a-zA-Z0-9]{20,}|pk-live_|pk-test_|AKIA)[A-Za-z0-9_\-]{8,}|eyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{10,}|(?:[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|API_KEY|ACCESS_KEY|PRIVATE_KEY))\s*[=:]\s*\S+|(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key|access[_-]?key|private[_-]?key)\s*[=:]\s*\S+/gi;
+// Secret-looking content. Three families:
+//  1. Known token shapes (GitHub/Slack/OpenAI/AWS/GitLab prefixes, JWTs, PEM private keys).
+//  2. ENV-style `NAME=value` / `NAME: value` where NAME contains a secret keyword at a word
+//     boundary (start or after `_`) — so SECRET_VALUE, TOKEN_FILE, KEY_PREFIX match but MONKEY
+//     and TURKEY do not. Over-redaction in presentation mode is safe; silly false positives aren't.
+//  3. Lowercase `password:`/`token=` etc. in free text.
+const SECRET_RE = new RegExp(
+  "(?:ghp_|gho_|ghs_|github_pat_|xox[baprs]-|sk-[a-zA-Z0-9]{16,}|pk-live_|pk-test_|AKIA|ASIA|glpat-)[A-Za-z0-9_\\-]{8,}" +
+  "|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}" +
+  "|-----BEGIN[A-Z ]+PRIVATE KEY-----[\\s\\S]*?-----END[A-Z ]+PRIVATE KEY-----" +
+  "|\\b(?:[A-Za-z0-9]+_)*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|AUTH|APIKEY|PRIVATE)(?:_[A-Za-z0-9]+)*\\s*[=:]\\s*\\S+" +
+  "|\\b(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key|access[_-]?key|private[_-]?key|credential)\\w*\\s*[=:]\\s*\\S+",
+  "gi");
 
 function redact(text: string): string {
   return text.replace(SECRET_RE, "[redacted by daimon]");
+}
+
+// Strip ansi-to-html markup to plain text and decode the entities the converter introduced, so
+// secret patterns that were split across <span> tags become matchable again.
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 }
 
 function redactNode(text: string): React.ReactNode {
@@ -62,6 +85,26 @@ function redactNode(text: string): React.ReactNode {
   if (parts.length === 0) return text;
   if (last < text.length) parts.push(text.slice(last));
   return parts;
+}
+
+// Central, content-based redaction: scrub secret-looking substrings from a parsed Out REGARDLESS
+// of how the output was classified (lines/ansi/pairs/table/logfmt/pretty/lslong/gitlog). Applied
+// once at the render boundary when presentation mode is on, so no per-renderer path can leak and
+// toggling presentation mode off restores the original (this transforms a copy, never the store).
+function redactOut(out: Out): Out {
+  switch (out.kind) {
+    case "lines":   return { ...out, lines: out.lines.map(redact) };
+    case "ansi":    return { ...out, html: redact(out.html) };
+    case "pairs":   return { ...out, pairs: out.pairs.map(([k, v]) => [k, redact(`${k}=${v}`) !== `${k}=${v}` ? "[redacted by daimon]" : v]) as [string, string][] };
+    case "table":   return { ...out, rows: out.rows.map((r) => r.map(redact)) };
+    case "logfmt":  return { ...out, lines: out.lines.map((rec) => Object.fromEntries(Object.entries(rec).map(([k, v]) => [k, redact(`${k}=${v}`) !== `${k}=${v}` ? "[redacted by daimon]" : v]))) };
+    case "pretty":  return { ...out, text: redact(out.text) };
+    case "gitdiff": return { ...out, raw: redact(out.raw) };
+    case "lslong":  return { ...out, entries: out.entries.map((e) => ({ ...e, name: redact(e.name) })) };
+    case "gitlog":  return { ...out, entries: out.entries.map((e) => ({ ...e, subject: redact(e.subject) })) };
+    // image/files/gitbranches/gitstatus carry no free-form secret-bearing text
+    default:        return out;
+  }
 }
 
 const EXT_LANG: Record<string, string> = {
@@ -144,28 +187,97 @@ function highlight(text: string, query: string): React.ReactNode {
 }
 
 function linkify(text: string): React.ReactNode {
-  const urlRe = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
+  return linkifyAll(text, undefined);
+}
+
+const OSC8_RE = /\[OSC8:([^\]]+?):([^\]]*?)\]/g;
+const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
+// Absolute paths and ~/paths — must be at word boundary, at least 2 segments or ~/
+const PATH_RE = /(?:^|(?<=\s))(?:~\/[^\s"'<>]+|\/(?:[^\s"'<>/]+\/)+[^\s"'<>]*[^\s"'<>./])/g;
+
+function linkifyAll(text: string, onPathClick: ((path: string) => void) | undefined): React.ReactNode {
+  // Build a combined list of all matches (OSC8, URL, path) sorted by index
+  type Chunk = { start: number; end: number; node: React.ReactNode };
+  const chunks: Chunk[] = [];
+  let m: RegExpExecArray | null;
+  let key = 0;
+
+  const osc8 = new RegExp(OSC8_RE.source, "g");
+  while ((m = osc8.exec(text)) !== null) {
+    const url = m[1]!;
+    const label = m[2]!;
+    chunks.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      node: (
+        <a
+          key={key++}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-signal underline underline-offset-2 hover:text-signal/80 break-all"
+        >
+          {label || url}
+        </a>
+      ),
+    });
+  }
+
+  const urlRe = new RegExp(URL_RE.source, "g");
+  while ((m = urlRe.exec(text)) !== null) {
+    // Skip if this range is already covered by an OSC8 chunk
+    if (chunks.some((c) => m!.index >= c.start && m!.index < c.end)) continue;
+    chunks.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      node: (
+        <a
+          key={key++}
+          href={m[0]}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-signal underline underline-offset-2 hover:text-signal/80 break-all"
+        >
+          {m[0]}
+        </a>
+      ),
+    });
+  }
+
+  if (onPathClick) {
+    const pathRe = new RegExp(PATH_RE.source, "g");
+    while ((m = pathRe.exec(text)) !== null) {
+      if (chunks.some((c) => m!.index >= c.start && m!.index < c.end)) continue;
+      const p = m[0];
+      chunks.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        node: (
+          <button
+            key={key++}
+            onClick={() => onPathClick(p)}
+            className="font-mono text-signal/70 hover:text-signal hover:underline underline-offset-2 cursor-pointer"
+          >
+            {p}
+          </button>
+        ),
+      });
+    }
+  }
+
+  if (chunks.length === 0) return text;
+
+  chunks.sort((a, b) => a.start - b.start);
+
   const parts: React.ReactNode[] = [];
   let last = 0;
-  let match: RegExpExecArray | null;
-  let key = 0;
-  while ((match = urlRe.exec(text)) !== null) {
-    if (match.index > last) parts.push(text.slice(last, match.index));
-    parts.push(
-      <a
-        key={key++}
-        href={match[0]}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-signal underline underline-offset-2 hover:text-signal/80 break-all"
-      >
-        {match[0]}
-      </a>
-    );
-    last = match.index + match[0].length;
+  for (const c of chunks) {
+    if (c.start > last) parts.push(text.slice(last, c.start));
+    parts.push(c.node);
+    last = c.end;
   }
   if (last < text.length) parts.push(text.slice(last));
-  return parts.length === 0 ? text : parts.length === 1 ? parts[0] : parts;
+  return parts.length === 1 ? parts[0] : parts;
 }
 
 type CommitDetail = { files: { status: string; path: string; additions: number; deletions: number }[]; body: string };
@@ -348,7 +460,7 @@ function DiffTable({ raw }: { raw: string }) {
                 <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30 bg-alarm/5">{row.lln ?? ""}</td>
                 <td className={`overflow-hidden whitespace-pre-wrap break-all px-3 py-0 ${row.left !== null ? "bg-alarm/10 text-alarm" : "bg-transparent"}`}>
                   {row.left !== null && row.right !== null
-                    ? charDiff(row.left, row.right)[0].map(([txt, hi], k) =>
+                    ? (charDiff(row.left, row.right)[0] ?? []).map(([txt, hi], k) =>
                         hi ? <mark key={k} className="bg-transparent text-alarm not-italic">{txt}</mark> : <span key={k}>{txt}</span>
                       )
                     : row.left ?? ""}
@@ -357,7 +469,7 @@ function DiffTable({ raw }: { raw: string }) {
                 <td className="select-none px-2 text-right tabular-nums text-muted-foreground/30 bg-signal/5">{row.rln ?? ""}</td>
                 <td className={`overflow-hidden whitespace-pre-wrap break-all px-3 py-0 ${row.right !== null ? "bg-signal/10 text-signal" : "bg-transparent"}`}>
                   {row.left !== null && row.right !== null
-                    ? charDiff(row.left, row.right)[1].map(([txt, hi], k) =>
+                    ? (charDiff(row.left, row.right)[1] ?? []).map(([txt, hi], k) =>
                         hi ? <mark key={k} className="bg-transparent text-signal not-italic">{txt}</mark> : <span key={k}>{txt}</span>
                       )
                     : row.right ?? ""}
@@ -460,12 +572,25 @@ function FullscreenPager({
 }) {
   const [fullscreen, setFullscreen] = useState(() => !!isLast);
   const searchRef = useRef<HTMLInputElement>(null);
+  const sentinelRef = useRef<HTMLSpanElement>(null);
+  const containerRef = useRef<HTMLElement | null>(null);
   const [search, setSearch] = useState("");
+
+  const openFullscreen = () => {
+    containerRef.current = sentinelRef.current?.closest("[data-pane]") as HTMLElement ?? document.body;
+    setFullscreen(true);
+  };
 
   useEffect(() => {
     window.dispatchEvent(new CustomEvent(fullscreen ? "pager-open" : "pager-close"));
     return () => { if (fullscreen) window.dispatchEvent(new CustomEvent("pager-close")); };
   }, [fullscreen]);
+
+  useEffect(() => {
+    if (sentinelRef.current && !containerRef.current) {
+      containerRef.current = sentinelRef.current.closest("[data-pane]") as HTMLElement ?? document.body;
+    }
+  });
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -496,16 +621,22 @@ function FullscreenPager({
     return (
       <button
         className="flex items-center gap-3 py-1 font-mono text-[13px] hover:opacity-80 transition-opacity"
-        onClick={() => setFullscreen(true)}
+        onClick={openFullscreen}
       >
+        <span ref={sentinelRef} />
         {collapsedSummary}
         <span className="text-muted-foreground/40 text-[11px]">click to expand</span>
       </button>
     );
   }
 
-  return createPortal(
-    <div className="absolute inset-0 z-50 flex flex-col bg-background font-mono text-[13px]">
+  const container = containerRef.current ?? document.body;
+  const isScoped = container !== document.body;
+  return (
+    <>
+      <span ref={sentinelRef} style={{ display: "none" }} />
+      {createPortal(
+    <div className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background font-mono text-[13px]`}>
       <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0">
         <span className="text-muted-foreground/60">{title}</span>
         {headerMeta}
@@ -534,7 +665,9 @@ function FullscreenPager({
         <span className={allCollapsed ? "text-signal/70 font-medium" : ""}>⌘A — {allCollapsed ? "expand all" : "collapse all"}</span>
       </div>
     </div>,
-    document.querySelector('main') ?? document.body
+    container
+      )}
+    </>
   );
 }
 
@@ -619,7 +752,7 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
   return (
     <FullscreenPager
       title="git log"
-      isLast={isLast}
+      isLast={isLast ?? false}
       collapsedSummary={<span className="text-muted-foreground/50">{entries.length} commit{entries.length !== 1 ? "s" : ""}</span>}
       headerMeta={<span className="text-muted-foreground/50">{entries.length} commit{entries.length !== 1 ? "s" : ""}</span>}
       allCollapsed={allCollapsed}
@@ -727,7 +860,7 @@ function lsDate(month: string, day: string, time: string): string {
   return `${month} ${d} ${time}`;
 }
 
-function LsLongView({ entries, total }: Extract<Out, { kind: "lslong" }>) {
+function LsLongView({ entries, total, onCd, cwd }: Extract<Out, { kind: "lslong" }> & { onCd?: (path: string) => void; cwd?: string }) {
   const hidden = entries.filter((e) => e.name.startsWith("."));
   const visible = entries.filter((e) => !e.name.startsWith("."));
   const sorted = [...hidden, ...visible];
@@ -755,6 +888,12 @@ function LsLongView({ entries, total }: Extract<Out, { kind: "lslong" }>) {
             ? "text-foreground/40"
             : "text-foreground/85";
 
+          const clickTarget = isDir
+            ? (cwd ? `${cwd}/${e.name}` : e.name)
+            : isLink && e.link
+            ? e.link
+            : null;
+
           return (
             <div
               key={e.name}
@@ -764,7 +903,16 @@ function LsLongView({ entries, total }: Extract<Out, { kind: "lslong" }>) {
               <span className="w-[3.5rem] shrink-0 text-right tabular-nums text-[12px] text-foreground/40">{humanSize(e.size)}</span>
               <span className="w-[5.5rem] shrink-0 text-[12px] text-muted-foreground/45 tabular-nums">{lsDate(e.month, e.day, e.time)}</span>
               <span className={`flex-1 truncate ${nameColor}`}>
-                {e.name}{isDir && <span className="text-foreground/30">/</span>}
+                {onCd && clickTarget ? (
+                  <button
+                    className="font-mono hover:text-signal hover:underline cursor-pointer"
+                    onClick={() => onCd(clickTarget)}
+                  >
+                    {e.name}{isDir && <span className="text-foreground/30">/</span>}
+                  </button>
+                ) : (
+                  <>{e.name}{isDir && <span className="text-foreground/30">/</span>}</>
+                )}
                 {e.link && <span className="ml-1 text-foreground/30">&#8594; {e.link}</span>}
               </span>
               <span className="shrink-0 text-[11px] text-muted-foreground/25 opacity-0 group-hover:opacity-100 transition-opacity">{e.user}</span>
@@ -806,7 +954,7 @@ const GIT_XY: Record<string, { label: string; cls: string }> = {
   U: { label: "unmerged", cls: "text-alarm" },
 };
 
-function GitStatusView({ branch, ahead, behind, staged, unstaged, untracked }: Extract<Out, { kind: "gitstatus" }>) {
+function GitStatusView({ branch, ahead, behind, staged, unstaged, untracked, onCd }: Extract<Out, { kind: "gitstatus" }> & { onCd?: (path: string) => void }) {
   if (!branch) return <div className="font-mono text-[13px] text-muted-foreground/50">not a git repository</div>;
   const clean = staged.length === 0 && unstaged.length === 0 && untracked.length === 0;
   const Section = ({ title, items, cls }: { title: string; items: { xy: string; path: string }[]; cls: string }) => (
@@ -817,7 +965,11 @@ function GitStatusView({ branch, ahead, behind, staged, unstaged, untracked }: E
         return (
           <div key={path} className="flex items-baseline gap-3 font-mono text-[13px]">
             <span className={`w-16 shrink-0 text-[11px] ${cls || info.cls}`}>{info.label}</span>
-            <span className="text-foreground">{path}</span>
+            {onCd ? (
+              <button className="font-mono hover:text-signal hover:underline cursor-pointer" onClick={() => onCd(path)}>{path}</button>
+            ) : (
+              <span className="text-foreground">{path}</span>
+            )}
           </div>
         );
       })}
@@ -842,7 +994,11 @@ function GitStatusView({ branch, ahead, behind, staged, unstaged, untracked }: E
           {untracked.map((p) => (
             <div key={p} className="flex items-baseline gap-3 font-mono text-[13px]">
               <span className="w-16 shrink-0 text-[11px] text-muted-foreground/50">new</span>
-              <span className="text-foreground/70">{p}</span>
+              {onCd ? (
+                <button className="font-mono text-foreground/70 hover:text-signal hover:underline cursor-pointer" onClick={() => onCd(p)}>{p}</button>
+              ) : (
+                <span className="text-foreground/70">{p}</span>
+              )}
             </div>
           ))}
         </div>
@@ -874,30 +1030,30 @@ function parseNodeJson(json: string): ParsedNode | null {
     if (start < 0 || end < 0) { console.warn("[parseNodeJson] no braces found, len=", clean.length); return null; }
     const o = JSON.parse(clean.slice(start, end + 1)) as Record<string, unknown>;
     if (!o || typeof o !== "object") return null;
-    const spec = (o.spec ?? {}) as Record<string, unknown>;
-    const status = (o.status ?? {}) as Record<string, unknown>;
-    const meta = (o.metadata ?? {}) as Record<string, unknown>;
+    const spec = (o['spec'] ?? {}) as Record<string, unknown>;
+    const status = (o['status'] ?? {}) as Record<string, unknown>;
+    const meta = (o['metadata'] ?? {}) as Record<string, unknown>;
 
-    const conditions: NodeCondition[] = ((status.conditions ?? []) as Record<string, string>[]).map((c) => ({
-      type: c.type ?? "",
-      status: c.status ?? "",
-      reason: c.reason ?? "",
-      message: c.message ?? "",
-      lastTransition: c.lastTransitionTime ?? "",
+    const conditions: NodeCondition[] = ((status['conditions'] ?? []) as Record<string, string>[]).map((c) => ({
+      type: c['type'] ?? "",
+      status: c['status'] ?? "",
+      reason: c['reason'] ?? "",
+      message: c['message'] ?? "",
+      lastTransition: c['lastTransitionTime'] ?? "",
     }));
 
-    const capacity: Record<string, string> = { ...((status.capacity ?? {}) as Record<string, string>) };
-    const allocatable: Record<string, string> = { ...((status.allocatable ?? {}) as Record<string, string>) };
-    const nodeInfo: Record<string, string> = { ...((status.nodeInfo ?? {}) as Record<string, string>) };
+    const capacity: Record<string, string> = { ...((status['capacity'] ?? {}) as Record<string, string>) };
+    const allocatable: Record<string, string> = { ...((status['allocatable'] ?? {}) as Record<string, string>) };
+    const nodeInfo: Record<string, string> = { ...((status['nodeInfo'] ?? {}) as Record<string, string>) };
 
     const taints: { key: string; effect: string; value?: string }[] =
-      ((spec.taints ?? []) as { key: string; effect: string; value?: string }[]).map((t) => ({
+      ((spec['taints'] ?? []) as { key: string; effect: string; value?: string }[]).map((t) => ({
         key: t.key, effect: t.effect, ...(t.value ? { value: t.value } : {}),
       }));
 
     return {
-      labels: { ...((meta.labels ?? {}) as Record<string, string>) },
-      annotations: { ...((meta.annotations ?? {}) as Record<string, string>) },
+      labels: { ...((meta['labels'] ?? {}) as Record<string, string>) },
+      annotations: { ...((meta['annotations'] ?? {}) as Record<string, string>) },
       conditions,
       capacity,
       allocatable,
@@ -1047,13 +1203,13 @@ function parseKubeCmd(input: string): { kubeCmd: string; resource: string; names
   const getM = t.match(/^(u8s\s+kubectl|u8s\s+k|kubectl|k)\s+get\s+(\S+)(?:\s+.*)?$/);
   if (getM) {
     const nsM = t.match(/(?:-n|--namespace)\s+(\S+)/);
-    return { kubeCmd: getM[1]!.replace(/\s+/, " "), resource: getM[2]!, namespace: nsM?.[1] };
+    return { kubeCmd: getM[1]!.replace(/\s+/, " "), resource: getM[2]!, ...(nsM?.[1] ? { namespace: nsM[1] } : {}) };
   }
   // kubectl describe <resource> <name> — whole output is one describe
   const descM = t.match(/^(u8s\s+kubectl|u8s\s+k|kubectl|k)\s+describe\s+(\S+)\s+(\S+)(?:\s+.*)?$/);
   if (descM) {
     const nsM = t.match(/(?:-n|--namespace)\s+(\S+)/);
-    return { kubeCmd: descM[1]!.replace(/\s+/, " "), resource: descM[2]!, namespace: nsM?.[1], isDescribe: true };
+    return { kubeCmd: descM[1]!.replace(/\s+/, " "), resource: descM[2]!, ...(nsM?.[1] ? { namespace: nsM[1] } : {}), isDescribe: true as const };
   }
   return null;
 }
@@ -1447,7 +1603,7 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
   return (
     <FullscreenPager
       title="git diff"
-      isLast={isLast}
+      isLast={isLast ?? false}
       collapsedSummary={<><span className="text-signal">+{totalAdd}</span><span className="text-alarm">-{totalDel}</span><span className="text-muted-foreground/50">{files.length} file{files.length !== 1 ? "s" : ""}</span></>}
       headerMeta={<><span className="text-signal">+{totalAdd}</span><span className="text-alarm">-{totalDel}</span><span className="text-muted-foreground/50">{files.length} file{files.length !== 1 ? "s" : ""}</span></>}
       allCollapsed={allCollapsed}
@@ -1503,14 +1659,205 @@ function highlightText(text: string, query: string): React.ReactNode {
   return parts.length === 0 ? text : parts;
 }
 
-function SearchableOutput({ html, lines, tone, pm }: {
+// Count occurrences of query in text (case-insensitive)
+function countMatches(text: string, query: string): number {
+  if (!query) return 0;
+  const lq = query.toLowerCase();
+  const lt = text.toLowerCase();
+  let n = 0, pos = 0;
+  while ((pos = lt.indexOf(lq, pos)) !== -1) { n++; pos += lq.length; }
+  return n;
+}
+
+// Highlight all occurrences; matchOffset = global index of first match in this text
+function highlightWithCurrent(text: string, query: string, matchOffset: number, currentMatch: number): React.ReactNode {
+  if (!query) return text;
+  const lq = query.toLowerCase();
+  const lt = text.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let last = 0, key = 0, localIdx = 0;
+  let pos = lt.indexOf(lq, 0);
+  while (pos !== -1) {
+    if (pos > last) parts.push(text.slice(last, pos));
+    const globalIdx = matchOffset + localIdx;
+    const isCurrent = globalIdx === currentMatch;
+    parts.push(
+      <mark key={key++} className={`not-italic rounded px-0.5 ${isCurrent ? "bg-signal/60 text-foreground" : "bg-signal/20 text-foreground"}`}>
+        {text.slice(pos, pos + query.length)}
+      </mark>
+    );
+    last = pos + lq.length;
+    localIdx++;
+    pos = lt.indexOf(lq, last);
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts.length === 0 ? text : parts;
+}
+
+const VIRTUAL_THRESHOLD = 500;
+
+const IMG_URL_RE = /^https?:\/\/\S+\.(?:png|jpg|jpeg|gif|webp)(\?[^\s]*)?$/i;
+
+const URL_BARE_RE = /^https?:\/\/[^\s<>"{}|\\^`[\]]+$/;
+
+function ContextMenu({ x, y, onCopy, onSearch, onOpenUrl, onClose }: {
+  x: number; y: number;
+  onCopy: () => void;
+  onSearch: (() => void) | null;
+  onOpenUrl: (() => void) | null;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handler = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent && e.key !== "Escape") return;
+      if (e instanceof MouseEvent && ref.current?.contains(e.target as Node)) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", handler);
+    return () => { document.removeEventListener("mousedown", handler); document.removeEventListener("keydown", handler); };
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      ref={ref}
+      style={{ position: "fixed", left: x, top: y, zIndex: 9999 }}
+      className="min-w-32 rounded border border-border bg-card py-1 shadow-lg"
+    >
+      <button className="block w-full px-3 py-1.5 text-left font-mono text-[12px] hover:bg-accent cursor-pointer" onClick={() => { onCopy(); onClose(); }}>Copy</button>
+      {onSearch && <button className="block w-full px-3 py-1.5 text-left font-mono text-[12px] hover:bg-accent cursor-pointer" onClick={() => { onSearch(); onClose(); }}>Search</button>}
+      {onOpenUrl && <button className="block w-full px-3 py-1.5 text-left font-mono text-[12px] hover:bg-accent cursor-pointer" onClick={() => { onOpenUrl(); onClose(); }}>Open URL</button>}
+    </div>,
+    document.body
+  );
+}
+
+function SelectableLine({ children, onSearch }: { children: React.ReactNode; onSearch: ((q: string) => void) | null }) {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const selRef = useRef("");
+
+  const getSel = () => window.getSelection()?.toString().trim() ?? "";
+
+  const handleDoubleClick = (e: React.MouseEvent) => {
+    // Browser default already selects a word; capture it or try caretRangeFromPoint
+    let sel = getSel();
+    if (!sel) {
+      const range = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+      if (range) { const sel2 = window.getSelection(); sel2?.removeAllRanges(); sel2?.addRange(range); sel = range.toString().trim(); }
+    }
+    selRef.current = sel;
+  };
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (e.detail !== 3) return;
+    // Triple-click: select whole line content
+    const sel = window.getSelection();
+    if (!sel?.anchorNode) return;
+    const range = document.createRange();
+    range.selectNodeContents(sel.anchorNode.nodeType === Node.TEXT_NODE ? sel.anchorNode.parentElement! : sel.anchorNode as Element);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    selRef.current = sel.toString().trim();
+  };
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    selRef.current = getSel();
+    setMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const isUrl = menu ? URL_BARE_RE.test(selRef.current) : false;
+
+  return (
+    <div className="select-text cursor-text" onDoubleClick={handleDoubleClick} onClick={handleClick} onContextMenu={handleContextMenu}>
+      {children}
+      {menu && (
+        <ContextMenu
+          x={menu.x} y={menu.y}
+          onCopy={() => { const t = selRef.current || getSel(); if (t) { navigator.clipboard.writeText(t); toast.success("Copied"); } }}
+          onSearch={onSearch && selRef.current ? () => onSearch!(selRef.current) : null}
+          onOpenUrl={isUrl ? () => window.open(selRef.current, "_blank", "noopener,noreferrer") : null}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function Lightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 cursor-zoom-out"
+      onClick={onClose}
+    >
+      <img src={src} alt="" className="max-w-[90vw] max-h-[90vh] object-contain" />
+    </div>
+  );
+}
+
+function VirtualLines({ visibleLines, toneClass, search, pm, currentMatch, matchOffsets, onSearch, onPathClick }: {
+  visibleLines: string[];
+  toneClass: string;
+  search: string;
+  pm: boolean;
+  currentMatch?: number | undefined;
+  matchOffsets?: number[] | undefined;
+  onSearch?: ((q: string) => void) | null;
+  onPathClick?: (path: string) => void;
+}) {
+  const parentRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: visibleLines.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 24, // 1.5rem line-height
+    overscan: 20,
+  });
+
+  return (
+    <div
+      ref={parentRef}
+      className="overflow-auto"
+      style={{ maxHeight: "60vh" }}
+    >
+      <div
+        className={`relative font-mono text-[13px] leading-6 whitespace-pre-wrap ${toneClass}`}
+        style={{ height: rowVirtualizer.getTotalSize() }}
+      >
+        {rowVirtualizer.getVirtualItems().map((vrow) => {
+          const line = visibleLines[vrow.index]!;
+          return (
+            <SelectableLine key={vrow.index} onSearch={onSearch ?? null}>
+              <div style={{ position: "absolute", top: vrow.start, width: "100%" }}>
+                {search
+                  ? highlightWithCurrent(pm ? line.replace(SECRET_RE, "[redacted by daimon]") : line, search, matchOffsets?.[vrow.index] ?? 0, currentMatch ?? -1)
+                  : (pm ? redactNode(line) : (linkifyAll(line, onPathClick) || " "))}
+              </div>
+            </SelectableLine>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
   html?: string;
   lines?: string[];
   tone?: string;
   pm: boolean;
+  onSearch?: ((q: string) => void) | null;
+  onPathClick?: (path: string) => void;
 }) {
   const [search, setSearch] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [currentMatch, setCurrentMatch] = useState(0);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -1533,7 +1880,35 @@ function SearchableOutput({ html, lines, tone, pm }: {
     return () => el.removeEventListener("keydown", onKey);
   }, [showSearch]);
 
+  // Reset current match when query changes
+  useEffect(() => { setCurrentMatch(0); }, [search]);
+
   const toneClass = tone === "bad" ? "text-alarm" : tone === "good" ? "text-signal" : tone === "muted" ? "text-muted-foreground" : "text-foreground";
+
+  // Compute per-line match offsets and total count (for lines mode)
+  const { totalMatches, matchOffsets } = useMemo(() => {
+    if (!lines || !search) return { totalMatches: 0, matchOffsets: undefined };
+    let total = 0;
+    const offsets = lines.map((l) => {
+      const off = total;
+      total += countMatches(pm ? l.replace(SECRET_RE, "[redacted by daimon]") : l, search);
+      return off;
+    });
+    return { totalMatches: total, matchOffsets: offsets };
+  }, [lines, search, pm]);
+
+  // For html mode, count matches in raw text
+  const htmlMatchCount = useMemo(() => {
+    if (!html || !search) return 0;
+    const raw = html.replace(/<[^>]+>/g, "");
+    return countMatches(pm ? redact(raw) : raw, search);
+  }, [html, search, pm]);
+
+  const matchCount = lines ? totalMatches : htmlMatchCount;
+
+  const clampedCurrent = matchCount > 0 ? Math.min(currentMatch, matchCount - 1) : 0;
+
+  const useVirtual = (lines?.length ?? 0) > VIRTUAL_THRESHOLD;
 
   return (
     <div ref={containerRef} className="relative" tabIndex={-1}>
@@ -1547,45 +1922,106 @@ function SearchableOutput({ html, lines, tone, pm }: {
             autoComplete="off" spellCheck={false}
             onKeyDown={(e) => {
               if (e.key === "Escape") { e.preventDefault(); setSearch(""); setShowSearch(false); }
+              if (e.key === "Enter") { e.preventDefault(); setCurrentMatch((c) => matchCount > 0 ? (c + 1) % matchCount : 0); }
               e.stopPropagation();
             }}
             className="w-40 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground/40"
           />
-          {search && <span className="font-mono text-[11px] text-muted-foreground/50">{
-            (() => {
-              if (lines) return lines.filter((l) => l.toLowerCase().includes(search.toLowerCase())).length + " lines";
-              if (html) { const raw = html.replace(/<[^>]+>/g, ""); const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"); return (raw.match(re)?.length ?? 0) + " hits"; }
-              return "";
-            })()
-          }</span>}
+          {search && matchCount > 0 && (
+            <span className="font-mono text-[11px] text-muted-foreground/60 tabular-nums">{clampedCurrent + 1}/{matchCount}</span>
+          )}
+          {search && matchCount === 0 && (
+            <span className="font-mono text-[11px] text-muted-foreground/40">no matches</span>
+          )}
+          {matchCount > 1 && (
+            <>
+              <button
+                onClick={() => setCurrentMatch((c) => (c - 1 + matchCount) % matchCount)}
+                className="text-muted-foreground/50 hover:text-muted-foreground px-0.5"
+                title="Previous match"
+              ><ChevronUpIcon className="size-3" /></button>
+              <button
+                onClick={() => setCurrentMatch((c) => (c + 1) % matchCount)}
+                className="text-muted-foreground/50 hover:text-muted-foreground px-0.5"
+                title="Next match"
+              ><ChevronDownIcon className="size-3" /></button>
+            </>
+          )}
           <button onClick={() => { setSearch(""); setShowSearch(false); }} className="text-muted-foreground/50 hover:text-muted-foreground"><XIcon className="size-3" /></button>
         </div>
       )}
       {lines !== undefined ? (
-        <div className={`font-mono text-[13px] leading-6 whitespace-pre-wrap ${toneClass}`}>
-          {(search
-            ? lines.filter((l) => l.toLowerCase().includes(search.toLowerCase()))
-            : lines
-          ).map((line, i) => (
-            <div key={i}>{search ? highlightText(pm ? line.replace(SECRET_RE, "[redacted by daimon]") : line, search) : (pm ? redactNode(line) : (linkify(line) || " "))}</div>
-          ))}
-        </div>
+        useVirtual ? (
+          <VirtualLines visibleLines={lines} toneClass={toneClass} search={search} pm={pm} currentMatch={clampedCurrent} onSearch={onSearch ?? null} {...(onPathClick ? { onPathClick } : {})} {...(matchOffsets ? { matchOffsets } : {})} />
+        ) : (
+          <div className={`font-mono text-[13px] leading-6 whitespace-pre-wrap ${toneClass}`}>
+            {lines.map((line, i) => {
+              const trimmed = line.trim();
+              if (!search && IMG_URL_RE.test(trimmed)) {
+                return (
+                  <div key={i}>
+                    {linkifyAll(line, onPathClick)}
+                    <img
+                      src={trimmed}
+                      alt=""
+                      className="mt-1 max-h-20 cursor-zoom-in rounded block"
+                      onClick={() => setLightboxSrc(trimmed)}
+                    />
+                  </div>
+                );
+              }
+              return (
+                <SelectableLine key={i} onSearch={onSearch ?? null}>
+                  <div>{search
+                    ? highlightWithCurrent(pm ? line.replace(SECRET_RE, "[redacted by daimon]") : line, search, matchOffsets?.[i] ?? 0, clampedCurrent)
+                    : (pm ? redactNode(line) : (linkifyAll(line, onPathClick) || " "))}</div>
+                </SelectableLine>
+              );
+            })}
+          </div>
+        )
       ) : html !== undefined ? (
         <pre className="whitespace-pre-wrap font-mono text-[13px] leading-6">
           {search
-            ? highlightText((pm ? redact(html) : html).replace(/<[^>]+>/g, ""), search)
-            // eslint-disable-next-line react/no-danger
-            : <span dangerouslySetInnerHTML={{ __html: pm ? redact(html) : html }} />
+            ? highlightWithCurrent((pm ? redact(stripHtml(html)) : html.replace(/<[^>]+>/g, "")), search, 0, clampedCurrent)
+            : pm
+              // Presentation mode: strip ANSI/HTML tags to plain text FIRST, then redact. Secret
+              // patterns (NAME=value) are broken up by the ansi <span> tags, so redacting the raw
+              // html misses them — matching on plain text catches them. Colors are dropped here,
+              // which is an acceptable trade to guarantee no secret leaks on a shared screen.
+              ? <span>{redact(stripHtml(html))}</span>
+              // eslint-disable-next-line react/no-danger
+              : <span dangerouslySetInnerHTML={{ __html: html }} />
           }
         </pre>
       ) : null}
+      {lightboxSrc && <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </div>
   );
 }
 
-function OutView({ out, input = "", ctx = "", isLast = false }: { out: Out; input?: string; ctx?: string; isLast?: boolean }) {
+function OutView({ out: rawOut, input = "", ctx = "", isLast = false, onSearch, onPathClick }: { out: Out; input?: string; ctx?: string; isLast?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const pm = useContext(PresentationModeContext);
+  // Content-based redaction at the render boundary: scrub secrets from the parsed output for
+  // EVERY kind in one place when presentation mode is on. Non-destructive — the stored block is
+  // untouched, so toggling presentation mode off restores the raw output.
+  const out = pm ? redactOut(rawOut) : rawOut;
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const kubeDescribeInfo = parseKubeCmd(input);
+
+  if (out.kind === "image") {
+    return (
+      <>
+        <img
+          src={out.src}
+          alt="terminal image"
+          className="max-w-full max-h-96 object-contain my-2 cursor-zoom-in rounded"
+          onClick={() => setLightboxSrc(out.src)}
+        />
+        {lightboxSrc && <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
+      </>
+    );
+  }
 
   if ((out.kind === "ansi" || out.kind === "lines") && kubeDescribeInfo) {
     const raw = out.kind === "lines" ? out.lines.join("\n") : out.html.replace(/<[^>]+>/g, "");
@@ -1598,17 +2034,21 @@ function OutView({ out, input = "", ctx = "", isLast = false }: { out: Out; inpu
   }
 
   if (out.kind === "ansi") {
-    const raw = out.html.replace(/<[^>]+>/g, "");
+    const rawHtml = rawOut.kind === "ansi" ? rawOut.html : out.html;
+    const raw = rawHtml.replace(/<[^>]+>/g, "");
     const lang = detectLang(input, raw);
-    if (lang) return <CodeView text={raw} lang={lang} />;
-    return <SearchableOutput html={out.html} pm={pm} />;
+    if (lang) return <CodeView text={pm ? redact(raw) : raw} lang={lang} />;
+    // SearchableOutput redacts internally (with the amber highlight), so feed it the RAW html.
+    return <SearchableOutput html={rawHtml} pm={pm} {...(onSearch != null ? { onSearch } : {})} {...(onPathClick ? { onPathClick } : {})} />;
   }
 
   if (out.kind === "lines") {
-    const text = out.lines.join("\n");
+    const rawLines = rawOut.kind === "lines" ? rawOut.lines : out.lines;
+    const text = rawLines.join("\n");
     const lang = detectLang(input, text);
     if (lang) return <CodeView text={pm ? redact(text) : text} lang={lang} />;
-    return <SearchableOutput lines={out.lines} tone={out.tone ?? undefined} pm={pm} />;
+    // SearchableOutput redacts + highlights internally; feed RAW lines.
+    return <SearchableOutput lines={rawLines} {...(out.tone ? { tone: out.tone } : {})} pm={pm} {...(onSearch != null ? { onSearch } : {})} {...(onPathClick ? { onPathClick } : {})} />;
   }
 
   if (out.kind === "files")
@@ -1616,9 +2056,18 @@ function OutView({ out, input = "", ctx = "", isLast = false }: { out: Out; inpu
       <div className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-x-6 gap-y-1.5">
         {out.items.map((it) => (
           <div key={it.name} className="flex items-baseline justify-between gap-3 font-mono text-[13px]">
-            <span className={it.dir ? "text-signal" : "text-foreground"}>
-              {it.name}{it.dir && "/"}
-            </span>
+            {onPathClick && it.dir ? (
+              <button
+                className="font-mono text-signal hover:underline cursor-pointer"
+                onClick={() => onPathClick(it.name)}
+              >
+                {it.name}/
+              </button>
+            ) : (
+              <span className={it.dir ? "text-signal" : "text-foreground"}>
+                {it.name}{it.dir && "/"}
+              </span>
+            )}
             <span className="text-[11px] tabular-nums text-muted-foreground/70">
               {it.dir ? "dir" : it.size != null ? `${it.size} B` : ""}
             </span>
@@ -1628,7 +2077,7 @@ function OutView({ out, input = "", ctx = "", isLast = false }: { out: Out; inpu
     );
 
   if (out.kind === "lslong")
-    return <LsLongView entries={out.entries} total={out.total} />;
+    return <LsLongView kind="lslong" entries={out.entries} total={out.total} {...(onPathClick ? { onCd: onPathClick } : {})} />;
 
   if (out.kind === "table")
     return <ExpandableTableView out={out} input={input} ctx={ctx} />;
@@ -1649,10 +2098,10 @@ function OutView({ out, input = "", ctx = "", isLast = false }: { out: Out; inpu
     return <GitLogView entries={out.entries} cwd={out.cwd} kind="gitlog" isLast={isLast} />;
 
   if (out.kind === "gitbranches")
-    return <GitBranchesView branches={out.branches} current={out.current} />;
+    return <GitBranchesView kind="gitbranches" branches={out.branches} current={out.current} />;
 
   if (out.kind === "gitstatus")
-    return <GitStatusView {...out} />;
+    return <GitStatusView {...out} {...(onPathClick ? { onCd: onPathClick } : {})} />;
 
   if (out.kind === "gitdiff")
     return <GitDiffView raw={out.raw} isLast={isLast} />;
@@ -1696,7 +2145,7 @@ function StdinRow({ sessionId }: { sessionId: string }) {
   );
 }
 
-export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false }: { block: Block; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; tuiHandle?: import("@/components/daimon/XTermPanel").XTermHandle | undefined }) {
+export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; tuiHandle?: import("@/components/daimon/XTermPanel").XTermHandle | undefined; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const ok = block.code === 0;
   const failed = !block.pending && !ok;
   const [expanded, setExpanded] = useState(true);
@@ -1715,6 +2164,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
 
   // Inline TUI: create xterm directly in this block's div
   const inlineTuiRef = useRef<HTMLDivElement>(null);
+  const tuiPaneRef = useRef<HTMLElement | null>(null);
   // Seed from map in case altScreenEnter already fired before this component mounted
   const [tuiFullscreen, setTuiFullscreen] = useState(() => getAltScreen(sessionId));
   const tuiFitRef = useRef<(() => void) | null>(null);
@@ -1723,24 +2173,37 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     if (!sessionId) return;
     // Re-check in case event arrived between useState init and effect setup
     setTuiFullscreen(getAltScreen(sessionId));
-    return shell.onAltScreen((tabId, enter) => {
+    const unsub = shell.onAltScreen((tabId, enter) => {
       if (tabId !== sessionId) return;
+      if (enter && inlineTuiRef.current) {
+        tuiPaneRef.current = inlineTuiRef.current.closest('[data-pane]') as HTMLElement ?? null;
+      }
       setTuiFullscreen(enter);
     });
+    return () => { unsub(); };
   }, [sessionId]);
   useEffect(() => {
     const el = inlineTuiRef.current;
     if (!el) return;
     if (tuiFullscreen) {
-      const main = el.closest('main');
-      const header = main?.querySelector('header');
-      const mainLeft = main?.getBoundingClientRect().left ?? 0;
-      const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
-      el.style.left = mainLeft + 'px';
-      el.style.top = headerBottom + 'px';
+      const pane = tuiPaneRef.current ?? el.closest('[data-pane]') as HTMLElement ?? null;
+      if (pane) {
+        const rect = pane.getBoundingClientRect();
+        el.style.left = rect.left + 'px';
+        el.style.top = rect.top + 'px';
+        el.style.width = rect.width + 'px';
+        el.style.height = rect.height + 'px';
+      } else {
+        el.style.left = '';
+        el.style.top = '';
+        el.style.width = '';
+        el.style.height = '';
+      }
     } else {
       el.style.left = '';
       el.style.top = '';
+      el.style.width = '';
+      el.style.height = '';
     }
     // double-rAF: first frame applies CSS, second measures after reflow
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1781,30 +2244,39 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     const unicode11 = new Unicode11Addon();
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
+    term.loadAddon(new ImageAddon());
     term.open(el);
     tuiFitRef.current = () => { fit.fit(); resizePty(sessionId, term.cols, term.rows); };
+    // Ensure pane ref is captured (may not be set yet if this is first mount)
+    if (!tuiPaneRef.current) {
+      tuiPaneRef.current = (el.closest('[data-pane]') as HTMLElement) ?? null;
+    }
 
     // Cell dimensions — measure once after open
     const CELL_H = 13 * 1.2; // fontSize * lineHeight
     const replay = getTuiReplayBuffer(sessionId);
     let altScreen = getAltScreen(sessionId);
+    const getPaneRect = () => {
+      const pane = tuiPaneRef.current ?? (el.closest('[data-pane]') as HTMLElement) ?? null;
+      return pane?.getBoundingClientRect() ?? null;
+    };
     // If alt-screen already active at mount, pre-position so first fit.fit()
     // measures correct dimensions and PTY is sized correctly before TUI app draws.
     if (altScreen) {
-      const main = el.closest('main');
-      const header = main?.querySelector('header');
-      const mainLeft = main?.getBoundingClientRect().left ?? 0;
-      const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
-      el.style.left = mainLeft + 'px';
-      el.style.top = headerBottom + 'px';
+      const rect = getPaneRect();
+      if (rect) {
+        el.style.left = rect.left + 'px';
+        el.style.top = rect.top + 'px';
+        el.style.width = rect.width + 'px';
+        el.style.height = rect.height + 'px';
+      }
     }
     const updateHeight = () => {
-      if (altScreen) {
-        el.style.height = "";
-        el.style.width = "";
-      } else {
-        el.style.height = "";
-        el.style.width = "";
+      if (!altScreen) {
+        el.style.left = '';
+        el.style.top = '';
+        el.style.width = '';
+        el.style.height = '';
       }
       fit.fit();
       if (!altScreen) {
@@ -1817,24 +2289,26 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     term.focus();
     term.onData((data) => sendRaw(sessionId, data));
     term.onResize(({ cols, rows }) => resizePty(sessionId, cols, rows));
-    // ResizeObserver fires on every pixel change of <main> (window resize + sidebar animation).
+    // ResizeObserver fires on every pixel change of the pane (window resize + sidebar animation).
     // Fire fit() directly each frame — DOM renderer has no glyph atlas to corrupt.
     let resizeRaf: number | null = null;
-    const mainEl = el.closest('main') ?? el;
+    const paneEl = (el.closest('[data-pane]') as HTMLElement) ?? el.closest('main') ?? el;
     const ro = new ResizeObserver(() => {
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       resizeRaf = requestAnimationFrame(() => {
         if (altScreen) {
-          const header = mainEl.querySelector('header');
-          const mainLeft = mainEl.getBoundingClientRect().left;
-          const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
-          el.style.left = mainLeft + 'px';
-          el.style.top = headerBottom + 'px';
+          const rect = getPaneRect();
+          if (rect) {
+            el.style.left = rect.left + 'px';
+            el.style.top = rect.top + 'px';
+            el.style.width = rect.width + 'px';
+            el.style.height = rect.height + 'px';
+          }
         }
         updateHeight();
       });
     });
-    ro.observe(mainEl);
+    ro.observe(paneEl);
     // Replay buffered bytes that arrived before this subscription was created
     for (const chunk of replay) term.write(new TextEncoder().encode(chunk));
     updateHeight();
@@ -1937,14 +2411,14 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
           )}
         </span>
       </header>
-      {/* Inline TUI: xterm mounted directly here for commands like hammer, fzf, etc. */}
+      {/* Inline TUI: xterm mounted directly here for alt-screen apps (vim, htop, fzf). */}
       {isTuiActive && (
         <div
           ref={inlineTuiRef}
           className={tuiFullscreen
             ? "xterm-transparent fixed inset-0 z-50 bg-black"
             : "xterm-transparent mt-2.5 rounded"}
-          style={{ minHeight: 0, willChange: 'transform' }}
+          style={{ minHeight: 0, willChange: "transform" }}
         />
       )}
       {!isTuiActive && block.out.length > 0 && (
@@ -1954,7 +2428,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
             className={`space-y-3 overflow-hidden transition-all ${expanded ? "" : "max-h-80"}`}
           >
             {block.out.map((o, i) => (
-              <OutView key={i} out={o} input={block.input} ctx={block.ctx || currentCtx} isLast={isLast && i === block.out.length - 1} />
+              <OutView key={i} out={o} input={block.input} ctx={block.ctx || currentCtx} isLast={!!isLast && i === block.out.length - 1} onSearch={onSearch ?? null} {...(onPathClick ? { onPathClick } : {})} />
             ))}
           </div>
           {(!expanded && overflows || expanded) && (

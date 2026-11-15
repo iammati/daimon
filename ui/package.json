@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "bun run scripts/embed-wasm.ts && bun run scripts/build-specs.ts && vite build",
-    "build:dev": "bun run scripts/embed-wasm.ts && bun run scripts/build-specs.ts && vite build --mode development",
+    "build": "bun run scripts/embed-wasm.ts && vite build",
+    "build:dev": "bun run scripts/embed-wasm.ts && vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write ."
@@ -46,8 +46,10 @@
     "@tailwindcss/vite": "^4.3.3",
     "@tanstack/react-query": "^5.102.8",
     "@tanstack/react-router": "1.170.18",
+    "@tanstack/react-virtual": "^3.14.26",
     "@tanstack/router-plugin": "1.168.23",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-image": "^0.9.0",
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/headless": "^6.0.0",
     "@xterm/xterm": "^5.5.0",

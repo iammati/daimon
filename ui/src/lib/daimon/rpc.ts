@@ -15,6 +15,8 @@ export type ShellContext = {
   gitAhead?: number;
   gitBehind?: number;
   gitDirty?: boolean;
+  gitAdded?: number;
+  gitRemoved?: number;
   exitCode?: number;
   cmdDuration?: number;
   cmdTimestamp?: number;
@@ -47,13 +49,17 @@ const lastContext = new Map<string, ShellContext>();
 let reqSeq = 0;
 const pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 
-function request<T>(msg: object): Promise<T> {
+function request<T>(msg: object, timeoutMs = 5000): Promise<T> {
   const req_id = `r${++reqSeq}`;
   const json = JSON.stringify({ ...msg, req_id });
   return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingRequests.delete(req_id);
+      reject(new Error("rpc timeout"));
+    }, timeoutMs);
     pendingRequests.set(req_id, {
-      resolve: (v) => resolve(v as T),
-      reject,
+      resolve: (v) => { clearTimeout(timer); resolve(v as T); },
+      reject:  (e) => { clearTimeout(timer); reject(e); },
     });
     if (ws?.readyState === WebSocket.OPEN) ws.send(json);
     else pending.push(json);
@@ -68,7 +74,13 @@ const pending: string[] = [];
 function connect() {
   ws = new WebSocket(WS_URL);
   ws.onopen = () => { while (pending.length) ws!.send(pending.shift()!); };
-  ws.onclose = () => { ws = null; setTimeout(connect, 1500); };
+  ws.onclose = () => {
+    ws = null;
+    // Reject all pending requests so callers don't hang across reconnect
+    for (const [, p] of pendingRequests) p.reject(new Error("disconnected"));
+    pendingRequests.clear();
+    setTimeout(connect, 1500);
+  };
   ws.onmessage = (e: MessageEvent) => {
     const ev: DaemonEvent = JSON.parse(e.data as string);
     if (ev.type === "output") outputListeners.forEach((fn) => fn(ev.tab_id, ev.data));
@@ -156,16 +168,18 @@ export const shell = {
 
   // ── Persistent store ────────────────────────────────────────────────────────
   historyAdd:          (cmd: string, ts: number) => request<boolean>({ type: "historyAdd", cmd, ts }),
-  historyList:         (limit?: number) => request<{ id: number; cmd: string; ts: number; source: string }[]>({ type: "historyList", limit: limit ?? 2000 }),
+  historyList:         (limit?: number) => request<{ id: number; cmd: string; ts: number; source: string }[]>({ type: "historyList", limit: limit ?? 1000000 }),
+  historySearch:       (query: string, limit?: number) => request<{ id: number; cmd: string; ts: number; source: string }[]>({ type: "historySearch", query, limit: limit ?? 50 }),
   blockSave:           (block: { id: string; session_id: string; input: string; cwd: string; ctx: string; ts: number; exit_code: number; output_json: string }) =>
     request<boolean>({ type: "blockSave", block }),
   blockList:           (session_id: string, limit?: number) =>
     request<{ id: string; session_id: string; input: string; cwd: string; ctx: string; ts: number; exit_code: number; output_json: string }[]>({ type: "blockList", session_id, limit: limit ?? 500 }),
   blockRecent:         (limit?: number) =>
     request<{ id: string; session_id: string; input: string; cwd: string; ctx: string; ts: number; exit_code: number; output_json: string }[]>({ type: "blockRecent", limit: limit ?? 200 }),
+  blockSearch:         (query: string, limit?: number) => request<{ id: string; session_id: string; input: string; cwd: string; ctx: string; ts: number; exit_code: number; output_json: string }[]>({ type: "blockSearch", query, limit: limit ?? 50 }),
   blockClear:          (session_id: string) => request<boolean>({ type: "blockClear", session_id }),
   prefSet:             (key: string, value: string) => request<boolean>({ type: "prefSet", key, value }),
   prefGet:             (key: string) => request<string | null>({ type: "prefGet", key }),
-  describeResource:    () => Promise.resolve(""),
-  getNodeEvents:       () => Promise.resolve([] as { type: string; reason: string; age: string; message: string }[]),
+  describeResource:    (..._args: unknown[]) => Promise.resolve(""),
+  getNodeEvents:       (..._args: unknown[]) => Promise.resolve([] as { type: string; reason: string; age: string; message: string }[]),
 };

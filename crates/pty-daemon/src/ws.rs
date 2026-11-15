@@ -226,6 +226,28 @@ pub async fn serve(addr: &str, db: Store) -> Result<()> {
                                 let _ = tx.blocking_send(SessionEvent::Response { req_id, ok, data: serde_json::Value::Bool(ok) });
                             });
                         }
+                        Ok(SessionCommand::BlockSearch { req_id, query, limit }) => {
+                            let tx = client_tx.clone();
+                            let db = db.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = match db.blocks_search(&query, limit) {
+                                    Ok(rows) => serde_json::to_value(rows).unwrap_or_default(),
+                                    Err(e) => { error!("blockSearch: {}", e); serde_json::Value::Array(vec![]) }
+                                };
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
+                            });
+                        }
+                        Ok(SessionCommand::HistorySearch { req_id, query, limit }) => {
+                            let tx = client_tx.clone();
+                            let db = db.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = match db.history_search(&query, limit) {
+                                    Ok(rows) => serde_json::to_value(rows).unwrap_or_default(),
+                                    Err(e) => { error!("historySearch: {}", e); serde_json::Value::Array(vec![]) }
+                                };
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
+                            });
+                        }
                         Ok(SessionCommand::PrefSet { req_id, key, value }) => {
                             let tx = client_tx.clone();
                             let db = db.clone();

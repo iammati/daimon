@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
-use shell_parser::{is_alt_screen_enter, is_command_start_marker, is_prompt_marker, strip_osc133, strip_pty_modes};
+use shell_parser::{is_alt_screen_enter, is_command_start_marker, is_prompt_marker, strip_osc133, strip_pty_modes, convert_osc8};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -73,6 +73,10 @@ pub enum SessionCommand {
     BlockRecent { req_id: String, limit: usize },
     /// Clear all blocks for a session.
     BlockClear { req_id: String, session_id: String },
+    /// FTS5 search across block inputs.
+    BlockSearch { req_id: String, query: String, limit: usize },
+    /// Search history by substring.
+    HistorySearch { req_id: String, query: String, limit: usize },
     /// Set a preference value.
     PrefSet { req_id: String, key: String, value: String },
     /// Get a preference value.
@@ -103,11 +107,17 @@ impl Session {
         cmd.env("FORCE_COLOR", "1");
         cmd.env("CLICOLOR_FORCE", "1");
         // Point ZDOTDIR at our integration dir which sources ~/.zshrc + adds OSC 133 hooks
-        let integration_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent().unwrap().parent().unwrap()
-            .join("shell-integration");
+            .to_path_buf();
+        let integration_dir = workspace_root.join("shell-integration");
         if integration_dir.exists() {
-            cmd.env("ZDOTDIR", integration_dir);
+            cmd.env("ZDOTDIR", &integration_dir);
+        }
+        // Point DAIMON_BIN at the compiled CLI binary so shell hooks work in dev
+        let daimon_bin = workspace_root.join("target/debug/daimon");
+        if daimon_bin.exists() {
+            cmd.env("DAIMON_BIN", daimon_bin);
         }
 
         let mut child = pair.slave.spawn_command(cmd).context("spawn shell failed")?;
@@ -163,8 +173,8 @@ impl Session {
                         let prompt = is_prompt_marker(&raw);
                         let cmd_start = is_command_start_marker(&raw);
 
-                        // Strip PTY mode sequences + OSC 133 markers (already detected above)
-                        let data = strip_osc133(&strip_pty_modes(&raw));
+                        // Strip PTY mode sequences + OSC 133 markers (already detected above); convert OSC 8 to markers
+                        let data = convert_osc8(&strip_osc133(&strip_pty_modes(&raw)));
 
                         let _ = tx.blocking_send(SessionEvent::Output {
                             tab_id: tid.clone(),

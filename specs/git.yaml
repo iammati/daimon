@@ -5,7 +5,7 @@ subcommands:
   - name: add
     description: Stage files
     args:
-      - kind: file
+      - kind: git_dirty
   - name: commit
     description: Record changes
     flags:

@@ -15,13 +15,15 @@
   --color-signal-soft: var(--signal-soft);
   --color-alarm: var(--alarm);
   --color-amber: var(--amber);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 8px);
-  --radius-3xl: calc(var(--radius) + 12px);
-  --radius-4xl: calc(var(--radius) + 16px);
+  /* Zero border-radius everywhere — squared UI. rounded-full (dots/knobs) is a fixed
+     9999px utility, unaffected by these tokens, so genuine circles survive. */
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
