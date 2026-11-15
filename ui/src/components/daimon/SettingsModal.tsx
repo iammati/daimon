@@ -7,6 +7,8 @@ import {
   InfoIcon,
   SearchIcon,
 } from "lucide-react";
+import { Keys } from "./Kbd";
+import { GLASS_DEFAULT, GLASS_MIN_OPACITY, hasNativeBlur, loadGlass, nativeBlurLabel, saveGlass, type Glass } from "@/lib/daimon/appearance";
 import { shell } from "@/lib/daimon/rpc";
 
 type Theme = "light" | "dracula";
@@ -82,6 +84,8 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
   const [bell, setBell] = useState(false);
   const [notifEnabled, setNotifEnabled] = useState(false);
   const [notifThreshold, setNotifThreshold] = useState(10);
+  const [glass, setGlassState] = useState<Glass>(loadGlass);
+  const setGlass = (patch: Partial<Glass>) => setGlassState((g) => { const n = { ...g, ...patch }; saveGlass(n); return n; });
 
   useEffect(() => {
     if (!open) return;
@@ -141,6 +145,53 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
             onChange={(e) => onFontSize(parseInt(e.target.value, 10))}
             className="w-28 accent-[hsl(var(--signal))]"
           />
+        </div>
+      ),
+    },
+    {
+      category: "appearance",
+      label: "Background opacity",
+      node: (
+        <div className="flex items-center gap-2">
+          {!document.documentElement.classList.contains("native-transparent") && (
+            <span className="font-mono text-[10px] text-amber/80" title="Start with DAIMON_TRANSPARENT=1 ./dev.sh for a see-through window">
+              needs DAIMON_TRANSPARENT=1
+            </span>
+          )}
+          <span className="font-mono text-xs text-muted-foreground w-9 text-right tabular-nums">{glass.opacity}%</span>
+          <input
+            type="range" min={GLASS_MIN_OPACITY} max={100} value={glass.opacity}
+            onChange={(e) => setGlass({ opacity: parseInt(e.target.value, 10) })}
+            className="w-28 accent-[var(--signal)]"
+          />
+        </div>
+      ),
+    },
+    {
+      category: "appearance",
+      label: "Background blur",
+      node: (
+        <div className="flex items-center gap-2">
+          {hasNativeBlur() ? (
+            <span
+              className="font-mono text-xs text-muted-foreground w-14 text-right"
+              title="Windows blurs the desktop behind the window in three steps: off, soft, frosted"
+            >{nativeBlurLabel(glass.blur)}</span>
+          ) : (
+            <span className="font-mono text-xs text-muted-foreground w-9 text-right tabular-nums">{glass.blur}px</span>
+          )}
+          <input
+            type="range" min={0} max={60} value={glass.blur}
+            onChange={(e) => setGlass({ blur: parseInt(e.target.value, 10) })}
+            className="w-28 accent-[var(--signal)]"
+          />
+          {(glass.opacity !== GLASS_DEFAULT.opacity || glass.blur !== GLASS_DEFAULT.blur) && (
+            <button
+              onClick={() => setGlass(GLASS_DEFAULT)}
+              className="font-mono text-[11px] text-muted-foreground/60 hover:text-foreground"
+              title="Reset opacity & blur to defaults"
+            >reset</button>
+          )}
         </div>
       ),
     },
@@ -278,7 +329,7 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
       onClick={onClose}
     >
       <div
-        className="w-[760px] h-[520px] bg-card border border-border flex overflow-hidden shadow-2xl"
+        className="w-[760px] h-[520px] bg-card/90 glass border border-border flex overflow-hidden shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Sidebar */}
@@ -335,9 +386,7 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
                 {SHORTCUTS_LIST.map(({ key, label }) => (
                   <div key={key} className="flex items-center justify-between px-4 py-2.5 border-b border-border/30">
                     <span className="font-sans text-sm text-foreground/90">{label}</span>
-                    <kbd className="font-mono text-[12px] px-2.5 py-1 bg-muted border border-border/60 text-foreground/80 shadow-[0_1px_0_0_oklch(0_0_0/0.4)]">
-                      {key}
-                    </kbd>
+                    <Keys combo={key} size="md" />
                   </div>
                 ))}
               </div>

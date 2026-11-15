@@ -63,6 +63,9 @@
 /* ── Light theme ──────────────────────────────────────────── */
 :root {
   --radius: 0.625rem;
+  /* Glass defaults — overridden at runtime from Settings → Appearance. */
+  --bg-alpha: 0.85;
+  --glass-blur: 24px;
 
   --paper:           oklch(0.974 0.002 264);
   --line:            oklch(0.913 0.006 264);
@@ -108,6 +111,7 @@
 
 /* ── Dark theme ───────────────────────────────────────────── */
 .dark {
+  color-scheme: dark; /* native controls (select, scrollbars) render dark */
   --paper:           oklch(0.130 0.012 270);
   --line:            oklch(1 0 0 / 0.08);
   --signal:          oklch(0.638 0.185 269);
@@ -152,6 +156,7 @@
 
 /* ── Dracula theme ────────────────────────────────────────── */
 .dracula {
+  color-scheme: dark; /* native controls (select, scrollbars) render dark */
   --paper:              oklch(0.215 0.024 275);
   --line:               oklch(0.330 0.030 275);
   --signal:             oklch(0.762 0.207 300);
@@ -192,9 +197,36 @@
   * {
     border-color: var(--color-border);
   }
+  html {
+    /* Solid base by default — only a genuinely see-through native window may go transparent. */
+    background-color: var(--background);
+  }
+  html.native-transparent {
+    background: transparent;
+  }
   body {
-    background-color: var(--color-background);
+    min-height: 100vh;
     color: var(--color-foreground);
+    background: transparent;
+  }
+  /* Window base: theme colour at the "Background opacity" alpha — real alpha, so in a
+     see-through window the desktop shows through. Plain `opacity` (no color-mix/calc) so
+     every webview honours it; clamped to ≥ 0.5 so the app can never become unreadable.
+     In a normal opaque window <html> is solid, so this has no visible effect. */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-color: var(--background);
+    opacity: 0.85;
+    opacity: max(var(--bg-alpha, 0.85), 0.5);
+  }
+  /* Full-viewport layer whose opacity changes every frame (invisibly: ±0.004) so the
+     whole window is damaged and repainted together with any partial update. */
+  html.repaint-keepalive body::after {
+    animation: daimon-keepalive 0.5s linear infinite alternate;
   }
 }
 
@@ -294,3 +326,59 @@
 .hljs-link                                     { text-decoration: underline; color: var(--signal); }
 .hljs-emphasis                                 { font-style: italic; }
 .hljs-strong                                   { font-weight: 600; }
+
+/* ── See-through window: one continuous background ─────────────────────────────
+   In a native see-through window the only backdrop is the window base (body::after):
+   sidebar, header and command bar drop their own fills so the desktop shows evenly
+   through the whole window. Their border lines stay as the separators.
+   Unlayered on purpose, so these win over Tailwind's utility layer. */
+html.native-transparent {
+  /* Fills for controls (hover, selected row, key caps) become a light veil of the text
+     colour instead of an opaque theme colour — reads on top of any desktop. */
+  --secondary:      color-mix(in oklab, var(--foreground) 9%, transparent);
+  --muted:          color-mix(in oklab, var(--foreground) 9%, transparent);
+  --accent:         color-mix(in oklab, var(--foreground) 9%, transparent);
+  --sidebar-accent: color-mix(in oklab, var(--foreground) 9%, transparent);
+  /* Secondary text as a share of the text colour rather than a fixed grey: a fixed
+     grey is tuned for the theme's own background and washes out once the desktop
+     shifts it; a share of --foreground keeps its distance on any backdrop, in any theme. */
+  --muted-foreground: color-mix(in oklab, var(--foreground) 68%, transparent);
+  /* Separators need a little more presence without panels on either side. */
+  --border:         color-mix(in oklab, var(--foreground) 14%, transparent);
+  --sidebar-border: color-mix(in oklab, var(--foreground) 14%, transparent);
+}
+/* Structural chrome (sidebar / header / command bar): no fill, no page blur. */
+html.native-transparent .chrome-surface {
+  background-color: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+/* Full-pane views (git log / git diff pager): they used to hide the content beneath
+   with an opaque fill. Here they stay clear, and what's beneath is hidden instead. */
+html.native-transparent .pager-overlay {
+  background-color: transparent;
+}
+html.native-transparent [data-pane]:has(> .pager-overlay) > :not(.pager-overlay),
+html.native-transparent body:has(> .pager-overlay) > #root {
+  visibility: hidden;
+}
+/* Buttons and chips that sit directly on the window background. */
+html.native-transparent .veil-surface {
+  background-color: color-mix(in oklab, var(--foreground) 6%, transparent);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html.native-transparent button.veil-surface:hover {
+  background-color: color-mix(in oklab, var(--foreground) 12%, transparent);
+}
+
+/* Frosted surface: blur + slight saturation boost of whatever is behind. */
+@utility glass {
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(160%);
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(160%);
+}
+
+@keyframes daimon-keepalive {
+  from { opacity: max(var(--bg-alpha, 0.85), 0.5); }
+  to   { opacity: calc(max(var(--bg-alpha, 0.85), 0.5) - 0.004); }
+}

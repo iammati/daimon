@@ -17,6 +17,7 @@ import {
   ServerIcon,
   FolderIcon,
 } from "lucide-react";
+import { Keys } from "./Kbd";
 import { shell } from "@/lib/daimon/rpc";
 import type { Block } from "@/lib/daimon/shell";
 
@@ -255,7 +256,7 @@ export function LandingPage({ blocks, history = [], onResume, onCd, onRun, onOpe
 
         <button
           onClick={onResume}
-          className="flex items-center gap-2 border border-border bg-card px-4 py-2.5 font-sans text-[13px] text-foreground transition-colors hover:border-signal/50 hover:bg-accent"
+          className="flex items-center gap-2 border border-border bg-card veil-surface px-4 py-2.5 font-sans text-[13px] text-foreground transition-colors hover:border-signal/50 hover:bg-accent"
         >
           <CornerDownLeftIcon className="size-3.5 text-signal" />
           Open here
@@ -387,7 +388,7 @@ export function LandingPage({ blocks, history = [], onResume, onCd, onRun, onOpe
           >
             <CommandIcon className="size-3" />
             Commands
-            <kbd className="ml-0.5 font-mono text-[10px] text-muted-foreground/55">⌘P</kbd>
+            <Keys combo="⌘P" size="xs" className="ml-1" />
           </button>
         )}
       </div>
@@ -403,7 +404,7 @@ export function LandingPage({ blocks, history = [], onResume, onCd, onRun, onOpe
               >
                 <Icon className="size-3.5 shrink-0 text-muted-foreground/55" />
                 <span className="flex-1 font-sans text-[12px] text-foreground/85">{label}</span>
-                <kbd className="shrink-0 font-mono text-[11px] text-muted-foreground/70 bg-muted px-1.5 py-0.5">{key}</kbd>
+                <Keys combo={key} size="xs" />
               </div>
             ))}
           </div>

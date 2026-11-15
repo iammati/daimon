@@ -636,7 +636,7 @@ function FullscreenPager({
     <>
       <span ref={sentinelRef} style={{ display: "none" }} />
       {createPortal(
-    <div className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background font-mono text-[13px]`}>
+    <div className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background pager-overlay font-mono text-[13px]`}>
       <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0">
         <span className="text-muted-foreground/60">{title}</span>
         {headerMeta}

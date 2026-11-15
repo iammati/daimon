@@ -1,19 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SearchIcon, XIcon, ArrowUpIcon, ArrowDownIcon, ChevronRightIcon } from "lucide-react";
+import { Keys } from "./Kbd";
 
-// Splits e.g. "⇧↵" → ["⇧","↵"], "^H" → ["^","H"], "Tab" → ["Tab"]
-function Keys({ combo }: { combo: string }) {
-  const tokens = combo.match(/⌘|⌥|⇧|⌃|\^|Tab|Esc|Enter|↑|↓|←|→|↵|[A-Za-z0-9]|[^\s]/g) ?? [combo];
-  return (
-    <span className="inline-flex items-center gap-[2px]">
-      {tokens.map((t, i) => (
-        <kbd key={i} className="inline-flex items-center justify-center px-1.5 py-0.5 font-mono text-[11px] font-medium text-foreground/75 bg-muted border border-border/60 shadow-[0_1px_0_0_oklch(0_0_0/0.4)] leading-none min-w-[1.25rem]">
-          {t}
-        </kbd>
-      ))}
-    </span>
-  );
-}
 
 type Result = {
   input: string;
@@ -65,7 +53,8 @@ function fullDateTime(ts: number): string {
 }
 
 function shortenPath(p: string): string {
-  return p.replace(/^\/Users\/[^/]+/, "~");
+  // macOS /Users/x, Linux/WSL /home/x, root's /root
+  return p.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)(?=\/|$)/, "~");
 }
 
 function highlightMatch(text: string, query: string): React.ReactNode {
@@ -133,7 +122,7 @@ function DetailView({ group, query, onRun, onBack }: {
       {/* Header */}
       <div className="flex items-start gap-2 px-4 py-2.5 border-b border-border bg-accent/30">
         <button onClick={onBack} className="shrink-0 text-muted-foreground/60 hover:text-foreground flex items-center gap-1 font-mono text-[12px] mt-0.5">
-          ← back <kbd className="text-[10px] opacity-50">Esc</kbd>
+          ← back <Keys combo="Esc" size="xs" />
         </button>
         <span className="font-mono text-[12px] text-muted-foreground/40 shrink-0 mt-0.5">·</span>
         <span className="font-mono text-[13px] text-foreground break-all flex-1">{highlightMatch(group.input, query)}</span>
@@ -246,7 +235,7 @@ export function GlobalSearch({ open, query, onQueryChange, results, loading, onS
   if (detail) {
     return (
       <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/50 backdrop-blur-sm" onClick={onClose}>
-        <div className="w-[680px] border border-border bg-card shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()} data-detail tabIndex={-1}>
+        <div className="w-[680px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()} data-detail tabIndex={-1}>
           <DetailView
             group={detail}
             query={query}
@@ -260,7 +249,7 @@ export function GlobalSearch({ open, query, onQueryChange, results, loading, onS
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-[680px] border border-border bg-card shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+      <div className="w-[680px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
 
         {/* Search bar */}
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">

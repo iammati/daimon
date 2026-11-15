@@ -83,6 +83,28 @@ pub enum SessionCommand {
     PrefGet { req_id: String, key: String },
 }
 
+/// Pick the shell to run. Daimon's OSC 133 integration is loaded via ZDOTDIR,
+/// which only zsh honours — so prefer zsh even when $SHELL is something else
+/// (e.g. bash, the default on most Linux/WSL distros). Override with DAIMON_SHELL.
+fn pick_shell() -> String {
+    if let Ok(s) = std::env::var("DAIMON_SHELL") {
+        return s;
+    }
+    let env_shell = std::env::var("SHELL").ok();
+    if let Some(s) = &env_shell {
+        if s.ends_with("/zsh") {
+            return s.clone();
+        }
+    }
+    for p in ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"] {
+        if std::path::Path::new(p).exists() {
+            return p.into();
+        }
+    }
+    tracing::warn!("zsh not found — falling back to $SHELL; shell integration will be unavailable");
+    env_shell.unwrap_or_else(|| "/bin/sh".into())
+}
+
 pub struct Session {
     pub tab_id: String,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -99,7 +121,7 @@ impl Session {
             .openpty(PtySize { rows: 24, cols: 120, pixel_width: 0, pixel_height: 0 })
             .context("openpty failed")?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let shell = pick_shell();
         let mut cmd = CommandBuilder::new(&shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("TERM_PROGRAM", "daimon");

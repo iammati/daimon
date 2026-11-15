@@ -762,7 +762,7 @@ function Daimon() {
             <div />
           </div>
         </div>
-        <div className={`sticky bottom-0 border-t border-border bg-background/80 backdrop-blur-xl${paneHideBar ? " hidden" : ""}`}>
+        <div className={`sticky bottom-0 border-t border-border bg-background/60 glass chrome-surface${paneHideBar ? " hidden" : ""}`}>
           {showPowerline && isFocused && (
             <PowerlineStatus
               k8sContext={k8sContext}
@@ -881,11 +881,11 @@ function Daimon() {
 
   return (
     <PresentationModeContext.Provider value={presentationMode}>
-    <div className="flex h-screen bg-background text-foreground overflow-hidden">
+    <div className="flex h-screen bg-transparent text-foreground overflow-hidden">
       <Toaster position="top-center" />
 
       {/* Sidebar */}
-      <aside className={`shrink-0 flex-col border-r border-border bg-sidebar lg:flex transition-all duration-200 overflow-hidden ${sidebarOpen ? "w-56" : "w-0 border-r-0"}`}>
+      <aside className={`shrink-0 flex-col border-r border-border bg-sidebar/70 glass chrome-surface lg:flex transition-all duration-200 overflow-hidden ${sidebarOpen ? "w-56" : "w-0 border-r-0"}`}>
         {/* Wordmark */}
         <div className="flex items-center justify-between px-5 pt-5 pb-4">
           <span className="flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-sidebar-foreground">
@@ -1079,7 +1079,7 @@ function Daimon() {
         />
         {/* Search overlay */}
         {searchOpen && (
-          <div className="absolute top-16 right-4 z-50 w-96 rounded-xl border border-border bg-card shadow-2xl">
+          <div className="absolute top-16 right-4 z-50 w-96 rounded-xl border border-border bg-card/90 glass shadow-2xl">
             <div className="flex items-center gap-2 border-b border-border px-3 py-2">
               <SearchIcon className="size-4 text-muted-foreground/50" />
               <input
@@ -1120,7 +1120,7 @@ function Daimon() {
             )}
           </div>
         )}
-        <header className={`sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background/80 px-4 py-3 backdrop-blur-xl${pagerActive ? " hidden" : ""}`}>
+        <header className={`sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background/60 px-4 py-3 glass chrome-surface${pagerActive ? " hidden" : ""}`}>
           <button
             onClick={() => setSidebarOpen((o) => !o)}
             title="Toggle sidebar (⌘B)"
@@ -1138,7 +1138,7 @@ function Daimon() {
 
           {/* Kubernetes context widget — only when k8s context is set. Hidden while powerline is on (powerline shows it instead). */}
           {showBadges && !showPowerline && k8sContext && (
-            <div className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/60 px-2.5 py-1">
+            <div className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/60 veil-surface px-2.5 py-1">
               <img src={kubernetesIcon} alt="Kubernetes" className="size-3.5 shrink-0" />
               <div className="flex items-center gap-1.5 font-mono text-[11px]">
                 <span className="text-[#326DE6]/90 font-medium">{k8sContext}</span>

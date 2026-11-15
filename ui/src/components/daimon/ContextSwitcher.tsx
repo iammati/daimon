@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RefreshCwIcon } from "lucide-react";
 import { shell } from "@/lib/daimon/rpc";
 import kubernetesIcon from "@/assets/kubernetes-icon.svg";
+import { Keys } from "./Kbd";
 
 function highlight(text: string, query: string): React.ReactNode {
   if (!query) return text;
@@ -108,18 +109,28 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
 
   return (
     <div className="relative" ref={box}>
-      <button
-        onClick={() => setOpenTracked(!open)}
-        className="flex items-center gap-2 border border-border bg-card py-1.5 pl-3 pr-2.5 transition-colors hover:border-signal/50"
-        aria-expanded={open}
-      >
-        <img src={kubernetesIcon} alt="" className="size-3.5 shrink-0" />
-        <span className="font-mono text-[12px] text-foreground">{ctxName || "no context"}</span>
-        <kbd className="ml-1 font-mono text-[10px] text-muted-foreground/50 border border-border/60 px-1 py-0.5 leading-none">⌘J</kbd>
-      </button>
+      <div className="flex items-stretch gap-1.5">
+        <button
+          onClick={() => setOpenTracked(!open)}
+          title="Kubernetes context"
+          aria-expanded={open}
+          className={`flex items-center gap-2 border bg-card/70 veil-surface py-1.5 pl-2.5 pr-3 glass transition-colors hover:border-signal/50 ${open ? "border-signal/60" : "border-border"}`}
+        >
+          <img src={kubernetesIcon} alt="" className="size-3.5 shrink-0" />
+          <span className={`font-mono text-[12px] ${ctxName ? "text-foreground" : "text-muted-foreground"}`}>{ctxName || "no context"}</span>
+        </button>
+        <button
+          onClick={() => setOpenTracked(!open)}
+          title="Switch context (⌘J)"
+          tabIndex={-1}
+          className="flex items-center border border-border bg-card/70 veil-surface px-1.5 glass transition-colors hover:border-signal/50"
+        >
+          <Keys combo="⌘J" size="xs" />
+        </button>
+      </div>
 
       {open && (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-72 overflow-hidden rounded-xl border border-border bg-card shadow-[0_24px_60px_-28px_oklch(0.2_0.02_265_/_0.45)]">
+        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-72 overflow-hidden rounded-xl border border-border bg-card/90 glass shadow-[0_24px_60px_-28px_oklch(0.2_0.02_265_/_0.45)]">
           <div className="flex items-center gap-2 border-b border-border px-3.5 py-2">
             <input
               ref={inputRef}

@@ -16,6 +16,7 @@ import {
   XIcon as XCircle2Icon,
   ServerIcon,
 } from "lucide-react";
+import { Keys } from "./Kbd";
 import { shell } from "@/lib/daimon/rpc";
 
 type Command = { id: string; label: string; description?: string; run: () => void };
@@ -187,7 +188,7 @@ export function CommandPalette({ open, onClose, onRun, onCd, history, sessions, 
       className="fixed inset-0 z-50 flex items-start justify-center pt-[14vh] bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
-      <div className="w-[700px] border border-border bg-card shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div className="w-[700px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center gap-3 border-b border-border px-4 py-3">
             <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/50" />
             <input
@@ -200,7 +201,7 @@ export function CommandPalette({ open, onClose, onRun, onCd, history, sessions, 
               autoComplete="off"
               spellCheck={false}
             />
-            <span className="font-mono text-[11px] text-muted-foreground/40">⌘P</span>
+            <Keys combo="⌘P" size="xs" />
           </div>
 
           {items.length > 0 ? (
@@ -260,7 +261,9 @@ export function CommandPalette({ open, onClose, onRun, onCd, history, sessions, 
                         <span className="shrink-0 font-mono text-[11px] text-muted-foreground/40">{formatTs(ts)}</span>
                       )}
                       {item.kind === "command" && item.value.description && !sub && (
-                        <span className="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground/65">{item.value.description}</span>
+                        /^[⌘⌥⇧⌃^]/.test(item.value.description)
+                          ? <Keys combo={item.value.description} size="xs" className="ml-auto" />
+                          : <span className="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground/65">{item.value.description}</span>
                       )}
                     </button>
                   </li>
