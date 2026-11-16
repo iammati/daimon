@@ -17,6 +17,15 @@ export type LsEntry = {
 /** One changed file in `git status`; add/del are line counts (absent for binaries). */
 export type GitStatusFile = { xy: string; path: string; from?: string; add?: number; del?: number };
 
+/** One local branch from `git branch`, with its inferred parent (git doesn't record one). */
+export type GitBranchNode = {
+  name: string; current: boolean; parent: string | null;
+  /** Commits on this branch / on its parent since they diverged. */
+  ahead: number; behind: number;
+  hash: string; upstream: string | null; upAhead: number; upBehind: number; upGone: boolean;
+  date: string; subject: string;
+};
+
 export type Out =
   | { kind: "lines"; lines: string[]; tone?: "normal" | "muted" | "bad" | "good" }
   | { kind: "ansi"; html: string }
@@ -26,7 +35,7 @@ export type Out =
   | { kind: "table"; head: string[]; rows: string[][]; accentCol?: number }
   | { kind: "pairs"; pairs: [string, string][] }
   | { kind: "gitlog"; entries: { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean }[]; cwd: string }
-  | { kind: "gitbranches"; branches: string[]; current: string }
+  | { kind: "gitbranches"; branches: string[]; current: string; trunk?: string | null; nodes?: GitBranchNode[] }
   | { kind: "gitstatus"; branch: string; upstream?: string | null; ahead: number; behind: number; staged: GitStatusFile[]; unstaged: GitStatusFile[]; untracked: string[]; added?: number; removed?: number }
   | { kind: "gitdiff"; raw: string }
   | { kind: "logfmt"; lines: Record<string, string>[] }
@@ -607,12 +616,12 @@ export async function run(
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
-  if (/^git\s+branch(\s|$)/.test(input)) {
+  if (/^git\s+branch(\s+(-v|-vv|--list|-l))*\s*$/.test(input)) {
     const t = Date.now();
     const id = Math.random().toString(36).slice(2);
     try {
-      const { branches, current } = await shell.listBranches(cwdStr);
-      const out: Out[] = [{ kind: "gitbranches", branches, current }];
+      const res = await shell.listBranches(cwdStr);
+      const out: Out[] = [{ kind: "gitbranches", ...res }];
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 0, out }, next: state };
     } catch {
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };

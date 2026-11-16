@@ -177,26 +177,137 @@ pub fn git_log(cwd: &str, limit: usize) -> Value {
     }
 }
 
+/// Above this many local branches, only compare each branch against the trunk
+/// (pairwise `rev-list` calls grow quadratically).
+const BRANCH_PAIRWISE_LIMIT: usize = 40;
+
+struct BranchInfo {
+    name: String,
+    current: bool,
+    hash: String,
+    upstream: String,
+    track: String,
+    date: String,
+    subject: String,
+}
+
+/// `git branch` plus an inferred "branched off" tree.
+///
+/// Git doesn't record a branch's parent, so it is inferred: the parent of B is the
+/// branch P with the fewest commits on B since their merge-base (ties → trunk, then
+/// the branch that moved on least, then name). Branches that strictly contain B
+/// (B is their ancestor) are never B's parent. The trunk (origin/HEAD, else
+/// main/master) is the root.
 pub fn git_branch(cwd: &str) -> Value {
-    match run("git", &["--no-pager", "branch", "--format=%(refname:short)|%(HEAD)"], Some(cwd)) {
-        Err(e) => json!({ "error": e }),
-        Ok(raw) => {
-            let branches: Vec<String> = raw.lines()
-                .filter_map(|l| {
-                    let parts: Vec<&str> = l.splitn(2, '|').collect();
-                    Some(parts[0].trim().to_string())
-                })
-                .collect();
-            // current branch first
-            let current = raw.lines()
-                .find_map(|l| {
-                    let parts: Vec<&str> = l.splitn(2, '|').collect();
-                    if parts.get(1) == Some(&"*") { Some(parts[0].trim().to_string()) } else { None }
-                })
-                .unwrap_or_default();
-            json!({ "branches": branches, "current": current })
+    let fmt = "--format=%(refname:short)%1f%(HEAD)%1f%(objectname:short)%1f%(upstream:short)%1f%(upstream:track,nobracket)%1f%(committerdate:relative)%1f%(contents:subject)";
+    let raw = match run("git", &["--no-pager", "branch", fmt], Some(cwd)) {
+        Err(e) => return json!({ "error": e }),
+        Ok(raw) => raw,
+    };
+    let infos: Vec<BranchInfo> = raw.lines().filter_map(|l| {
+        let f: Vec<&str> = l.splitn(7, '\x1f').collect();
+        if f.len() < 7 || f[0].starts_with('(') { return None; } // skip "(HEAD detached at …)"
+        Some(BranchInfo {
+            name: f[0].trim().to_string(),
+            current: f[1] == "*",
+            hash: f[2].to_string(),
+            upstream: f[3].to_string(),
+            track: f[4].to_string(),
+            date: f[5].to_string(),
+            subject: f[6].to_string(),
+        })
+    }).collect();
+
+    let names: Vec<String> = infos.iter().map(|b| b.name.clone()).collect();
+    let current = infos.iter().find(|b| b.current).map(|b| b.name.clone()).unwrap_or_default();
+    let has = |n: &str| names.iter().any(|b| b == n);
+
+    let trunk: Option<String> = run("git", &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], Some(cwd))
+        .ok()
+        .and_then(|r| r.trim().split_once('/').map(|(_, b)| b.to_string()))
+        .filter(|b| has(b))
+        .or_else(|| ["main", "master", "trunk", "develop"].iter().find(|b| has(b)).map(|b| b.to_string()));
+
+    // (ahead of P, behind P) for branch B, i.e. commits only on B / only on P.
+    let counts = |p: &str, b: &str| -> Option<(u64, u64)> {
+        let out = run("git", &["rev-list", "--left-right", "--count", &format!("{p}...{b}")], Some(cwd)).ok()?;
+        let mut it = out.split_whitespace().map(|n| n.parse::<u64>().ok());
+        let (behind, ahead) = (it.next()??, it.next()??);
+        Some((ahead, behind))
+    };
+
+    // name → (parent, ahead, behind)
+    let mut parent: std::collections::HashMap<String, (String, u64, u64)> = std::collections::HashMap::new();
+    for b in &names {
+        if Some(b) == trunk.as_ref() { continue; }
+        let candidates: Vec<&String> = if names.len() > BRANCH_PAIRWISE_LIMIT {
+            trunk.iter().filter(|t| *t != b).collect()
+        } else {
+            names.iter().filter(|p| *p != b).collect()
+        };
+        let mut best: Option<((u64, bool, u64, String), (String, u64, u64))> = None;
+        for p in candidates {
+            let Some((ahead, behind)) = counts(p, b) else { continue };
+            let is_trunk = Some(p) == trunk.as_ref();
+            // P strictly contains B → P is a descendant, not a parent.
+            if ahead == 0 && behind > 0 && !is_trunk { continue; }
+            // Same tip: only the trunk or an alphabetically earlier branch may parent it (no 2-cycles).
+            if ahead == 0 && behind == 0 && !is_trunk && p.as_str() > b.as_str() { continue; }
+            let key = (ahead, !is_trunk, behind, p.clone());
+            if best.as_ref().map_or(true, |(k, _)| key < *k) {
+                best = Some((key, (p.clone(), ahead, behind)));
+            }
+        }
+        if let Some((_, v)) = best { parent.insert(b.clone(), v); }
+    }
+
+    // Break any remaining cycles by re-rooting a member onto the trunk (or making it a root).
+    for b in &names {
+        let mut seen = std::collections::HashSet::new();
+        let mut cur = b.clone();
+        while let Some((p, _, _)) = parent.get(&cur) {
+            if !seen.insert(cur.clone()) {
+                let fix = cur.clone();
+                match &trunk {
+                    Some(t) if *t != fix => {
+                        let (a, bh) = counts(t, &fix).unwrap_or((0, 0));
+                        parent.insert(fix, (t.clone(), a, bh));
+                    }
+                    _ => { parent.remove(&fix); }
+                }
+                break;
+            }
+            cur = p.clone();
         }
     }
+
+    let track_n = |track: &str, word: &str| -> u64 {
+        track.split(',').map(str::trim)
+            .find_map(|t| t.strip_prefix(word).and_then(|n| n.trim().parse().ok()))
+            .unwrap_or(0)
+    };
+    let nodes: Vec<Value> = infos.iter().map(|b| {
+        let (p, ahead, behind) = match parent.get(&b.name) {
+            Some((p, a, bh)) => (Value::String(p.clone()), *a, *bh),
+            None => (Value::Null, 0, 0),
+        };
+        json!({
+            "name": b.name,
+            "current": b.current,
+            "parent": p,
+            "ahead": ahead,
+            "behind": behind,
+            "hash": b.hash,
+            "upstream": if b.upstream.is_empty() { Value::Null } else { Value::String(b.upstream.clone()) },
+            "upAhead": track_n(&b.track, "ahead"),
+            "upBehind": track_n(&b.track, "behind"),
+            "upGone": b.track == "gone",
+            "date": b.date,
+            "subject": b.subject,
+        })
+    }).collect();
+
+    json!({ "branches": names, "current": current, "trunk": trunk, "nodes": nodes })
 }
 
 pub fn list_contexts() -> Value {

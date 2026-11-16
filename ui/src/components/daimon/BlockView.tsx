@@ -1,13 +1,13 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useContext, createContext, useMemo, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { createPortal } from "react-dom";
-import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon } from "lucide-react";
+import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon, CircleDotIcon, CloudIcon, CloudOffIcon, ArrowUpIcon, ArrowDownIcon, CheckIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Keys } from "./Kbd";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, STREAMING_INTERACTIVE_RE, abandonRun } from "@/lib/daimon/shell";
-import type { Block, Out, LsEntry, GitStatusFile } from "@/lib/daimon/shell";
+import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode } from "@/lib/daimon/shell";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -679,6 +679,11 @@ function FullscreenPager({
         onToggleAll();
         return;
       }
+      // Plain Ctrl/Cmd+A: no-op in the pager (no page-wide select-all); in search it selects the query.
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "a") {
+        if (!inSearch) e.preventDefault();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         e.preventDefault();
         if (inSearch) { searchRef.current?.blur(); return; }
@@ -1009,21 +1014,121 @@ function LsLongView({ entries, total, onCd, cwd }: Extract<Out, { kind: "lslong"
   );
 }
 
-function GitBranchesView({ branches, current }: Extract<Out, { kind: "gitbranches" }>) {
+type BranchTreeRow = { node: GitBranchNode; depth: number; guides: boolean[]; last: boolean };
+
+/** Flatten the inferred parent links into display rows (DFS: trunk first, then recency of name). */
+function branchTreeRows(nodes: GitBranchNode[], trunk: string | null | undefined): BranchTreeRow[] {
+  const byName = new Map(nodes.map((n) => [n.name, n]));
+  const kids = new Map<string | null, GitBranchNode[]>();
+  for (const n of nodes) {
+    const p = n.parent && byName.has(n.parent) ? n.parent : null;
+    kids.set(p, [...(kids.get(p) ?? []), n]);
+  }
+  const order = (a: GitBranchNode, b: GitBranchNode) =>
+    (a.name === trunk ? -1 : b.name === trunk ? 1 : 0) || a.name.localeCompare(b.name);
+  const rows: BranchTreeRow[] = [];
+  const walk = (parent: string | null, depth: number, guides: boolean[]) => {
+    const list = [...(kids.get(parent) ?? [])].sort(order);
+    list.forEach((node, i) => {
+      const last = i === list.length - 1;
+      rows.push({ node, depth, guides, last });
+      walk(node.name, depth + 1, depth === 0 ? [] : [...guides, !last]);
+    });
+  };
+  walk(null, 0, []);
+  return rows;
+}
+
+/** Tree connector for one indentation level: │ (continues), ├ / └ (this row's own joint). */
+function TreeGuide({ kind }: { kind: "pass" | "blank" | "tee" | "elbow" }) {
   return (
-    <div className="space-y-0.5">
-      {branches.map((b) => (
-        <div key={b} className="flex items-center gap-2 font-mono text-[13px] leading-6">
-          {b === current
-            ? <><span className="text-signal">*</span><span className="text-signal">{b}</span></>
-            : <><span className="w-3 shrink-0" /><span className="text-foreground">{b}</span></>
-          }
-          {b === current && (
-            <span className="flex items-center gap-1 text-[10px] text-signal/70">
-              <GitBranchIcon className="size-2.5" />
-              current
+    <span className="relative w-5 shrink-0 self-stretch">
+      {(kind === "pass" || kind === "tee") && <span className="absolute left-2 top-0 bottom-0 border-l border-border" />}
+      {kind === "elbow" && <span className="absolute left-2 top-0 h-1/2 border-l border-border" />}
+      {(kind === "tee" || kind === "elbow") && <span className="absolute left-2 top-1/2 w-2.5 border-t border-border" />}
+    </span>
+  );
+}
+
+function BranchUpstream({ n }: { n: GitBranchNode }) {
+  if (!n.upstream) {
+    return <span className="flex items-center gap-1 text-muted-foreground/35" title="no upstream — local only"><CloudOffIcon className="size-3" />local</span>;
+  }
+  if (n.upGone) {
+    return <span className="flex items-center gap-1 text-alarm/80" title={`${n.upstream} was deleted on the remote`}><CloudOffIcon className="size-3" />gone</span>;
+  }
+  return (
+    <span className="flex items-center gap-1.5 text-muted-foreground/55" title={`tracks ${n.upstream}`}>
+      <CloudIcon className="size-3" />
+      <span>{n.upstream}</span>
+      {!n.upAhead && !n.upBehind && <CheckIcon className="size-3 text-emerald-400/70" />}
+      {n.upAhead > 0 && <span className="text-amber-400/90">↑{n.upAhead}</span>}
+      {n.upBehind > 0 && <span className="text-sky-400">↓{n.upBehind}</span>}
+    </span>
+  );
+}
+
+function GitBranchesView({ branches, current, trunk, nodes }: Extract<Out, { kind: "gitbranches" }>) {
+  // Blocks saved before the tree existed only carry names — keep the flat list for them.
+  if (!nodes?.length) {
+    return (
+      <div className="space-y-0.5">
+        {branches.map((b) => (
+          <div key={b} className="flex items-center gap-2 font-mono text-[13px] leading-6">
+            <GitBranchIcon className={`size-3.5 ${b === current ? "text-signal" : "text-muted-foreground/40"}`} />
+            <span className={b === current ? "text-signal" : "text-foreground"}>{b}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const rows = branchTreeRows(nodes, trunk);
+  return (
+    <div className="font-mono text-[13px]">
+      {rows.map(({ node: n, depth, guides, last }) => (
+        <div key={n.name} className={`group flex items-stretch gap-2 rounded-sm pr-2 leading-7 ${n.current ? "bg-signal/[0.06]" : "hover:bg-foreground/[0.03]"}`}>
+          {/* tree guides */}
+          {depth > 0 && (
+            <span className="flex shrink-0 pl-1">
+              {guides.map((cont, i) => <TreeGuide key={i} kind={cont ? "pass" : "blank"} />)}
+              <TreeGuide kind={last ? "elbow" : "tee"} />
             </span>
           )}
+
+          {/* name + badges */}
+          <span className={`flex min-w-0 shrink-0 items-center gap-1.5 ${depth === 0 ? "pl-1" : ""}`}>
+            {n.current
+              ? <CircleDotIcon className="size-3.5 shrink-0 text-signal" />
+              : <GitBranchIcon className={`size-3.5 shrink-0 ${n.name === trunk ? "text-purple-400/80" : "text-muted-foreground/45"}`} />}
+            <span className={n.current ? "font-medium text-signal" : n.name === trunk ? "text-purple-300" : "text-foreground/90"}>{n.name}</span>
+            {n.current && <span className="rounded-sm bg-signal/15 px-1 text-[10px] leading-4 text-signal">HEAD</span>}
+            {n.name === trunk && <span className="rounded-sm bg-purple-400/10 px-1 text-[10px] leading-4 text-purple-300/80">trunk</span>}
+          </span>
+
+          {/* divergence from parent */}
+          {n.parent && (
+            <span
+              className="flex shrink-0 items-center gap-1.5 text-[11px]"
+              title={`${n.ahead} commit${n.ahead === 1 ? "" : "s"} not on ${n.parent} · ${n.parent} has ${n.behind} newer`}
+            >
+              {n.ahead === 0 && n.behind === 0
+                ? <span className="text-muted-foreground/35">= {n.parent}</span>
+                : <>
+                    <span className={`flex items-center ${n.ahead ? "text-emerald-400/80" : "text-muted-foreground/30"}`}><ArrowUpIcon className="size-3" />{n.ahead}</span>
+                    <span className={`flex items-center ${n.behind ? "text-amber-400/80" : "text-muted-foreground/30"}`}><ArrowDownIcon className="size-3" />{n.behind}</span>
+                  </>}
+            </span>
+          )}
+
+          <span className="flex shrink-0 items-center text-[11px]"><BranchUpstream n={n} /></span>
+
+          {/* tip commit */}
+          <span className="ml-auto flex min-w-0 items-center gap-2 text-[11px]">
+            <span className="shrink-0 text-amber-300/50">{n.hash}</span>
+            <span className="truncate text-muted-foreground/55">{n.subject}</span>
+            <span className="shrink-0 text-muted-foreground/30">{n.date}</span>
+          </span>
         </div>
       ))}
     </div>
@@ -2282,7 +2387,7 @@ function OutView({ out: rawOut, input = "", ctx = "", isLast = false, onSearch, 
     return <GitLogView entries={out.entries} cwd={out.cwd} kind="gitlog" isLast={isLast} />;
 
   if (out.kind === "gitbranches")
-    return <GitBranchesView kind="gitbranches" branches={out.branches} current={out.current} />;
+    return <GitBranchesView {...out} />;
 
   if (out.kind === "gitstatus")
     return <GitStatusView {...out} {...(onPathClick ? { onCd: onPathClick } : {})} />;

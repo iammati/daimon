@@ -1,3 +1,4 @@
+import type { GitBranchNode } from "./shell";
 /// WebSocket transport shim — identical shell API surface to the Electrobun RPC version.
 /// Connects to the Rust pty-daemon at ws://localhost:7878.
 
@@ -161,7 +162,7 @@ export const shell = {
   loadSessions:        () => Promise.resolve([] as { id: string; title: string; icon: string }[]),
   saveSessions:        () => Promise.resolve(),
   gitStatus:           (cwd: string) => request<GitStatus>({ type: "gitStatus", cwd }),
-  listBranches:        (cwd: string) => request<{ branches: string[]; current: string }>({ type: "gitBranch", cwd }),
+  listBranches:        (cwd: string) => request<{ branches: string[]; current: string; trunk?: string | null; nodes?: GitBranchNode[] }>({ type: "gitBranch", cwd }),
   listLog:             (cwd: string, limit?: number) => request<LogEntry[]>({ type: "gitLog", cwd, limit: limit ?? 50 }),
   gitDiff:             (cwd: string, args?: string[]) => request<{ raw: string }>({ type: "gitDiff", cwd, args: args ?? [] }),
   getCommitDetail:     (hash: string, cwd: string) => request<CommitDetail>({ type: "commitDetail", hash, cwd }),
