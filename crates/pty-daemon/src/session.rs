@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use serde::{Deserialize, Serialize};
-use shell_parser::{is_alt_screen_enter, is_command_start_marker, is_prompt_marker, strip_osc133, strip_pty_modes, convert_osc8};
+use shell_parser::{is_alt_screen_enter, is_command_start_marker, is_prompt_marker, strip_osc133, strip_pty_modes};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -349,8 +349,9 @@ impl Session {
                         let prompt = is_prompt_marker(&raw);
                         let cmd_start = is_command_start_marker(&raw);
 
-                        // Strip PTY mode sequences + OSC 133 markers (already detected above); convert OSC 8 to markers
-                        let data = convert_osc8(&strip_osc133(&strip_pty_modes(&raw)));
+                        // Strip PTY mode sequences + OSC 133 markers (already detected above).
+                        // OSC 8 hyperlinks pass through: xterm and the block renderer both handle them.
+                        let data = strip_osc133(&strip_pty_modes(&raw));
 
                         {
                             let mut s = st.lock().unwrap();

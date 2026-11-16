@@ -234,43 +234,19 @@ function linkify(text: string): React.ReactNode {
   return linkifyAll(text, undefined);
 }
 
-const OSC8_RE = /\[OSC8:([^\]]+?):([^\]]*?)\]/g;
 const URL_RE = /https?:\/\/[^\s<>"{}|\\^`[\]]+/g;
 // Absolute paths and ~/paths — must be at word boundary, at least 2 segments or ~/
 const PATH_RE = /(?:^|(?<=\s))(?:~\/[^\s"'<>]+|\/(?:[^\s"'<>/]+\/)+[^\s"'<>]*[^\s"'<>./])/g;
 
 function linkifyAll(text: string, onPathClick: ((path: string) => void) | undefined): React.ReactNode {
-  // Build a combined list of all matches (OSC8, URL, path) sorted by index
+  // Build a combined list of all matches (URL, path) sorted by index
   type Chunk = { start: number; end: number; node: React.ReactNode };
   const chunks: Chunk[] = [];
   let m: RegExpExecArray | null;
   let key = 0;
 
-  const osc8 = new RegExp(OSC8_RE.source, "g");
-  while ((m = osc8.exec(text)) !== null) {
-    const url = m[1]!;
-    const label = m[2]!;
-    chunks.push({
-      start: m.index,
-      end: m.index + m[0].length,
-      node: (
-        <a
-          key={key++}
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-signal underline underline-offset-2 hover:text-signal/80 break-all"
-        >
-          {label || url}
-        </a>
-      ),
-    });
-  }
-
   const urlRe = new RegExp(URL_RE.source, "g");
   while ((m = urlRe.exec(text)) !== null) {
-    // Skip if this range is already covered by an OSC8 chunk
-    if (chunks.some((c) => m!.index >= c.start && m!.index < c.end)) continue;
     chunks.push({
       start: m.index,
       end: m.index + m[0].length,
@@ -2046,6 +2022,53 @@ function ContextMenu({ x, y, onCopy, onSearch, onOpenUrl, onClose }: {
   );
 }
 
+/** Character offset of a DOM position within `root`'s text. */
+function textOffsetIn(root: Node, node: Node, offset: number): number {
+  const r = document.createRange();
+  r.selectNodeContents(root);
+  r.setEnd(node, offset);
+  return r.toString().length;
+}
+
+/** The DOM position `chars` characters into `root`'s text (clamped to the end). */
+function positionAt(root: Node, chars: number): [Node, number] {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let left = chars;
+  let last: Text | null = null;
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    if (left <= n.length) return [n, left];
+    left -= n.length;
+    last = n;
+  }
+  return last ? [last, last.length] : [root, 0];
+}
+
+/**
+ * Colored command output. While a command streams, the html is replaced on every
+ * update, which would throw away a text selection made in it (even mid-drag) — so the
+ * selection is carried across the swap by its character offsets.
+ */
+function AnsiHtml({ html }: { html: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const sel = window.getSelection();
+    const a = sel?.anchorNode, f = sel?.focusNode;
+    const inA = !!a && el.contains(a), inF = !!f && el.contains(f);
+    if (!sel || sel.isCollapsed || (!inA && !inF)) { el.innerHTML = html; return; }
+    const aOff = inA ? textOffsetIn(el, a!, sel.anchorOffset) : 0;
+    const fOff = inF ? textOffsetIn(el, f!, sel.focusOffset) : 0;
+    // An end outside this output (selection spans blocks) is untouched by the swap.
+    const outA: [Node, number] = [a!, sel.anchorOffset], outF: [Node, number] = [f!, sel.focusOffset];
+    el.innerHTML = html;
+    const [an, ao] = inA ? positionAt(el, aOff) : outA;
+    const [fn, fo] = inF ? positionAt(el, fOff) : outF;
+    try { sel.setBaseAndExtent(an, ao, fn, fo); } catch { /* position gone — nothing to restore */ }
+  }, [html]);
+  return <span ref={ref} />;
+}
+
 function SelectableLine({ children, onSearch }: { children: React.ReactNode; onSearch: ((q: string) => void) | null }) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const selRef = useRef("");
@@ -2303,8 +2326,7 @@ function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
               // html misses them — matching on plain text catches them. Colors are dropped here,
               // which is an acceptable trade to guarantee no secret leaks on a shared screen.
               ? <span>{redact(stripHtml(html))}</span>
-              // eslint-disable-next-line react/no-danger
-              : <span dangerouslySetInnerHTML={{ __html: html }} />
+              : <AnsiHtml html={html} />
           }
         </pre>
       ) : null}

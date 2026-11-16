@@ -686,8 +686,11 @@ function Daimon() {
         return;
       }
       if (e.key === "c") {
-        // Ctrl-C with pending command → SIGINT to PTY, abandon after 2s if stuck
-        if (e.ctrlKey && !e.metaKey) {
+        // Ctrl-C with pending command → SIGINT to PTY, abandon after 2s if stuck.
+        // With text marked it copies instead (below) and drops the selection, so the
+        // command keeps running; a second Ctrl-C interrupts.
+        const marked = window.getSelection()?.toString() ?? "";
+        if (e.ctrlKey && !e.metaKey && !marked) {
           const sess = sessions.find((s) => s.id === activeId);
           if (sess?.blocks.some((b) => b.pending)) {
             e.preventDefault();
@@ -696,10 +699,11 @@ function Daimon() {
             return;
           }
         }
-        const sel = window.getSelection()?.toString() ?? "";
+        const sel = marked;
         if (!sel) return;
         navigator.clipboard.writeText(sel).catch(() => {});
         clip("Copied", sel);
+        if (e.ctrlKey && !e.metaKey) window.getSelection()?.removeAllRanges();
       }
     };
 

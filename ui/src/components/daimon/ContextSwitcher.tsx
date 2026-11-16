@@ -21,6 +21,8 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
   const [open, setOpen] = useState(false);
   const [cursor, setCursor] = useState(0);
 
+  const openRef = useRef(open);
+  openRef.current = open;
   const setOpenTracked = (next: boolean) => { setOpen(next); onOpenChange?.(next); };
 
   useEffect(() => {
@@ -63,6 +65,9 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
       if (e.key === "Escape") setOpenTracked(false);
     };
     const click = (e: MouseEvent) => {
+      // Only while open: closing hands focus back to the composer, and doing that on
+      // every mousedown would cancel a text selection being started in the output.
+      if (!openRef.current) return;
       if (box.current && !box.current.contains(e.target as Element)) setOpenTracked(false);
     };
     window.addEventListener("keydown", key);

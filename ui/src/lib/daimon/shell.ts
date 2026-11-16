@@ -70,10 +70,12 @@ export const STREAMING_INTERACTIVE_RE = /^\s*(ssh\b|sftp\b|mosh\b|nc\s+|ncat\s+|
 const INTERACTIVE_RE = /^\s*(scp|ipmitool|ipmi|kubectl\s+(exec|attach|debug)|oc\s+(exec|attach)|docker\s+(exec|run\s+-it?)|podman\s+(exec|run\s+-it?)|sudo\s+(-[siSI]\s+)?(-u\s+\S+\s+)?(-[siSI]\s+)?(su|bash|zsh|sh|fish)\b|su\s+|bash\s+-i|zsh\s+-i|python\s+-c|python3\s+-c)/;
 
 // TUI sequences that signal an interactive program.
-// Covers: cursor-up redraws, erase-line, hide/show cursor (spinners/menus),
+// Covers: cursor-up redraws, hide/show cursor (spinners/menus),
 // cursor-absolute-position (full-screen apps: k9s, lazygit, etc emit \x1b[H or \x1b[r;cH),
 // erase-display (\x1b[2J / \x1b[3J), enable mouse tracking (\x1b[?1000h).
-const TUI_RE = /\x1b\[\d*A|\x1b\[2K|\x1b\[\?25[lh]|\x1b\[\d*;\d*H|\x1b\[H\b|\x1b\[2J|\x1b\[3J|\x1b\[\?1000h|\x1b\[\?1049[lh]/;
+// Not erase-line (\x1b[2K): on its own that's a one-line progress redraw (vite, npm),
+// which normalizeTerminal replays in the block.
+const TUI_RE = /\x1b\[\d*A|\x1b\[\?25[lh]|\x1b\[\d*;\d*H|\x1b\[H\b|\x1b\[2J|\x1b\[3J|\x1b\[\?1000h|\x1b\[\?1049[lh]/;
 
 // Per-tab alt-screen state — driven by daemon altScreenEnter/Exit events.
 const inAltScreenMap = new Map<string, boolean>();
@@ -168,7 +170,8 @@ for (let i = 0; i < 24; i++) {
 
 function ansiToHtml(raw: string): string {
   const s = applyBackspace(raw)
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\](?!8;)[^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC 8 (hyperlinks) handled below
+    .replace(/(\x1b\]8;[^\x07\x1b]*)\x07/g, "$1\x1b\\")              // …BEL-terminated → ST, so the control-char strip keeps them whole
     .replace(/\x1b[()][AB012B]/g, "")
     .replace(/\x1b[=>]/g, "")
     .replace(/\x1b[MDE]/g, "")
@@ -178,20 +181,35 @@ function ansiToHtml(raw: string): string {
 
   let out = "";
   let open = false;
+  let curStyle = "";
+  let linkOpen = false;
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const re = /\x1b\[([0-9;]*)m/g;
+  // SGR, or an OSC 8 hyperlink open (with URL) / close (empty URL)
+  const re = /\x1b\[([0-9;]*)m|\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
   let last = 0;
 
   for (const m of s.matchAll(re)) {
     out += esc(s.slice(last, m.index));
     last = (m.index ?? 0) + m[0].length;
+    if (m[2] !== undefined) {
+      // Keep <a> and the style <span>s properly nested: close the span, switch the link, reopen.
+      if (open) out += "</span>";
+      if (linkOpen) { out += "</a>"; linkOpen = false; }
+      const url = m[2];
+      if (/^(?:https?|mailto):/i.test(url)) {
+        out += `<a href="${esc(url).replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer" class="text-signal underline underline-offset-2 hover:text-signal/80">`;
+        linkOpen = true;
+      }
+      if (open) out += `<span style="${curStyle}">`;
+      continue;
+    }
     const codes = (m[1] ?? "").split(";").map(Number);
     let style = "";
     let i = 0;
     while (i < codes.length) {
       const c = codes[i]!;
       if (c === 0) { style = ""; }
-      else if (c === 1) { style += "font-weight:bold;"; }
+      else if (c === 1) { style += "font-weight:600;"; }
       else if (c === 2) { style += "opacity:0.7;"; }
       else if (c === 3) { style += "font-style:italic;"; }
       else if (c === 4) { style += "text-decoration:underline;"; }
@@ -228,14 +246,17 @@ function ansiToHtml(raw: string): string {
     }
     if (open) { out += "</span>"; open = false; }
     if (style) { out += `<span style="${style}">`; open = true; }
+    curStyle = style;
   }
   out += esc(s.slice(last));
   if (open) out += "</span>";
+  if (linkOpen) out += "</a>";
   return out;
 }
 
-// Returns true if the string contains ANSI color/style escape sequences
-const hasColor = (s: string) => /\x1b\[[0-9;]*m/.test(s);
+// Returns true if the string contains ANSI color/style escape sequences or OSC 8
+// hyperlinks — anything that needs the html renderer.
+const hasColor = (s: string) => /\x1b\[[0-9;]*m|\x1b\]8;/.test(s);
 
 const now = () =>
   new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });

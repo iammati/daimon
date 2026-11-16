@@ -91,24 +91,6 @@ pub fn strip_osc133(s: &str) -> String {
     re.replace_all(s, "").into_owned()
 }
 
-/// Convert OSC 8 hyperlinks to [OSC8:URL:TEXT] markers for frontend rendering.
-/// ESC]8;;URL ST text ESC]8;; ST → [OSC8:URL:TEXT]
-pub fn convert_osc8(s: &str) -> String {
-    // Match: ESC]8;params;url(BEL|ST) ... text ... ESC]8;;(BEL|ST)
-    let re = regex_lite::Regex::new(
-        r"\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)(.*?)\x1b\]8;;(?:\x07|\x1b\\)"
-    ).unwrap();
-    re.replace_all(s, |caps: &regex_lite::Captures| {
-        let url = caps.get(1).map_or("", |m| m.as_str());
-        let text = caps.get(2).map_or("", |m| m.as_str());
-        if url.is_empty() {
-            text.to_string()
-        } else {
-            format!("[OSC8:{}:{}]", url, text)
-        }
-    }).into_owned()
-}
-
 fn matches_prefix(cmd: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|p| cmd.starts_with(p) || cmd == p.trim())
 }
@@ -184,26 +166,5 @@ mod tests {
         assert!(is_tui_command("htop"));
         assert!(!is_tui_command("ssh nous"));
         assert!(!is_tui_command("ls"));
-    }
-
-    #[test]
-    fn osc8_hyperlinks_converted() {
-        // BEL terminator
-        assert_eq!(
-            convert_osc8("\x1b]8;;https://example.com\x07click here\x1b]8;;\x07"),
-            "[OSC8:https://example.com:click here]"
-        );
-        // ST terminator
-        assert_eq!(
-            convert_osc8("\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\"),
-            "[OSC8:https://example.com:click here]"
-        );
-        // Empty URL → strip both markers, keep text
-        assert_eq!(
-            convert_osc8("\x1b]8;;\x07plain\x1b]8;;\x07"),
-            "plain"
-        );
-        // No OSC8 → unchanged
-        assert_eq!(convert_osc8("hello world"), "hello world");
     }
 }

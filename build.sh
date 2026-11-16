@@ -141,13 +141,24 @@ win_stop() {
     </dev/null >/dev/null 2>&1) || true
 }
 
+# Stop Windows-side builds that outlived their build.sh. Ctrl+C only ends the WSL half of
+# an interop process: Electrobun's build engine keeps running on Windows, holds the
+# project build lock, and the next build waits on it forever.
+win_stop_builds() {
+  (cd /mnt/c && powershell.exe -NoProfile -Command "
+    Get-Process bun -ErrorAction SilentlyContinue | Where-Object { \$_.Path -eq '$(wslpath -w "$1/tools/bun.exe")' } | ForEach-Object { taskkill.exe /F /T /PID \$_.Id | Out-Null }
+    \$all = Get-CimInstance Win32_Process; \$ids = \$all.ProcessId
+    \$all | Where-Object { \$_.Name -eq 'hutch-engine.exe' -and \$_.CommandLine -like '* electrobun build*' -and \$ids -notcontains \$_.ParentProcessId } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }
+  " </dev/null >/dev/null 2>&1) || true
+}
+
 build_windows() {
   local la stage out dll archive exe
   la=$(cd /mnt/c 2>/dev/null && cmd.exe /c "echo %LOCALAPPDATA%" 2>/dev/null | tr -d '\r')
   [ -n "$la" ] && [ "$la" != "%LOCALAPPDATA%" ] || { log "couldn't resolve %LOCALAPPDATA%"; return 1; }
   stage="$(wslpath -u "$la")/daimon-build"
   out="$stage/daimon2-win-x64"
-  mkdir -p "$stage/tools" "$stage/app" "$stage/ui" "$stage/target/release" || return 1
+  mkdir -p "$stage/tools" "$stage/app" "$stage/ui" "$stage/target/release" "$stage/hutch" || return 1
 
   if [ ! -x "$stage/tools/bun.exe" ]; then
     if [ -x "$stage/../daimon-dev/tools/bun.exe" ]; then   # dev.sh already fetched one
@@ -164,6 +175,8 @@ build_windows() {
 
   log "building Electrobun app (win-x64, stable)..."
   win_stop "$out"
+  win_stop_builds "$stage"
+  trap 'win_stop_builds "'"$stage"'"; exit 130' INT TERM
   rm -rf "$stage/app/src" "$stage/ui/dist" "$stage/app/build" "$stage/app/artifacts"
   cp -r "$ROOT/app/src" "$stage/app/src" && cp -r "$ROOT/ui/dist" "$stage/ui/dist" \
     && cp "$ROOT/target/release/pty-daemon" "$stage/target/release/" \
@@ -174,8 +187,13 @@ build_windows() {
     cp "$ROOT/app/package.json" "$ROOT/app/bun.lock" "$stage/app/" || return 1
     (cd "$stage/app" && ../tools/bun.exe install --frozen-lockfile </dev/null) || return 1
   fi
-  (cd "$stage/app" && WSLENV="${WSLENV:+$WSLENV:}NODE_ENV" NODE_ENV=production \
+  # Own Electrobun store (HUTCH_HOME): a running `electrobun run` — i.e. ./dev.sh — holds
+  # the lock on the shared one in %USERPROFILE%\.hutch, and the build would wait on it
+  # without a word until that app quits.
+  (cd "$stage/app" && WSLENV="${WSLENV:+$WSLENV:}NODE_ENV:HUTCH_HOME/p" NODE_ENV=production HUTCH_HOME="$stage/hutch" \
     ../tools/bun.exe node_modules/electrobun/bin/electrobun.cjs build --env=stable </dev/null) || return 1
+
+  trap - INT TERM
 
   archive=$(ls "$stage"/app/artifacts/stable-win-x64-*.tar.zst 2>/dev/null | head -1)
   [ -n "$archive" ] || { log "no stable-win-x64-*.tar.zst produced"; return 1; }
