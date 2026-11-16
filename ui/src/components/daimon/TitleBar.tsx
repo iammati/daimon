@@ -35,7 +35,7 @@ export function TitleBar() {
     return () => window.removeEventListener("daimon:window-state", onState);
   }, [custom]);
 
-  if (!custom) return <div style={base} />;
+  if (!custom) return <div className="titlebar-drag electrobun-webkit-app-region-drag" style={base} />;
 
   return (
     <div className="titlebar-drag flex justify-end" style={base}>
