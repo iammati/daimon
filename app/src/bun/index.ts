@@ -5,6 +5,7 @@ import {
   type BackdropKind,
 } from "./winBackdrop";
 import { enablePinchZoom } from "./macMagnification";
+import { enableMovableByBackground } from "./macWindowDrag";
 import { focusWebview } from "./winFocus";
 
 // ── pty-daemon ────────────────────────────────────────────────────────────────
@@ -83,9 +84,15 @@ const win = new BrowserWindow({
   frame: { width: 1280, height: 800, x: 100, y: 100 },
   // See-through window where supported; the UI paints its own translucent background.
   transparent: nativeTransparent,
+  // Custom HTML titlebar: hide native title bar, keep traffic lights inset.
+  ...(process.platform === "darwin" && {
+    titleBarStyle: "hiddenInset" as const,
+    trafficLightOffset: { x: 16, y: 14 },
+  }),
 });
 
 enablePinchZoom(); // macOS only
+enableMovableByBackground(); // macOS only — native drag via movableByWindowBackground
 
 // Window re-activated (un-minimize, alt-tab / click back from another app): give the
 // page keyboard focus and tell it, so the command input is focused right away. The

@@ -368,11 +368,9 @@ html.native-transparent {
   --border:         color-mix(in oklab, var(--foreground) 14%, transparent);
   --sidebar-border: color-mix(in oklab, var(--foreground) 14%, transparent);
 }
-/* Structural chrome (sidebar / header / command bar): no fill, no page blur. */
+/* Structural chrome (sidebar / command bar): no fill in see-through mode, but keep blur. */
 html.native-transparent .chrome-surface {
   background-color: transparent;
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
 }
 /* Full-pane views (git log / git diff pager): they used to hide the content beneath
    with an opaque fill. Here they stay clear, and what's beneath is hidden instead. */
@@ -395,6 +393,23 @@ html.native-transparent button.veil-surface:hover {
 
 /* Frosted surface: blur + slight saturation boost of whatever is behind. */
 @utility glass {
+  -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(160%);
+  backdrop-filter: blur(var(--glass-blur, 24px)) saturate(160%);
+}
+
+/* Custom titlebar drag region */
+.titlebar-drag {
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+/* Interactive elements inside a drag region must opt out */
+.no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+/* In native-transparent mode: blur the desktop through the entire window base */
+html.native-transparent body::after {
   -webkit-backdrop-filter: blur(var(--glass-blur, 24px)) saturate(160%);
   backdrop-filter: blur(var(--glass-blur, 24px)) saturate(160%);
 }

@@ -1045,13 +1045,17 @@ function Daimon() {
 
   return (
     <PresentationModeContext.Provider value={presentationMode}>
-    <div className="flex h-screen bg-transparent text-foreground overflow-hidden">
+    <div className="flex flex-col h-screen bg-transparent text-foreground overflow-hidden">
       <Toaster position="top-center" />
 
+      {/* Titlebar spacer — 36px empty zone for native movableByWindowBackground drag */}
+      <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: 36, zIndex: 9999, WebkitUserSelect: "none", userSelect: "none" } as React.CSSProperties} />
+
+      <div className="flex flex-1 overflow-hidden">
       {/* Sidebar */}
       <aside className={`shrink-0 flex-col border-r border-border bg-sidebar/70 glass chrome-surface lg:flex transition-all duration-200 overflow-hidden ${sidebarOpen ? "w-56" : "w-0 border-r-0"}`}>
         {/* Wordmark */}
-        <div className="flex items-center justify-between px-5 pt-5 pb-4">
+        <div className="flex items-center justify-between px-5 pb-4" style={{ paddingTop: "calc(1.25rem + 36px)" }}>
           <span className="flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-sidebar-foreground">
             <span className="text-sidebar-foreground/40">›_</span>
             daimon
@@ -1231,7 +1235,7 @@ function Daimon() {
       </aside>
 
       {/* Main */}
-      <main className="relative flex min-w-0 flex-1 flex-col">
+      <main className="relative flex min-w-0 flex-1 flex-col bg-background/70 glass chrome-surface">
         <GlobalSearch
           open={globalSearchOpen}
           query={globalSearchQuery}
@@ -1284,16 +1288,16 @@ function Daimon() {
             )}
           </div>
         )}
-        <header className={`sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background/60 px-4 py-3 glass chrome-surface${pagerActive ? " hidden" : ""}`}>
+        <header className={`sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-background/70 glass chrome-surface px-4 pb-3${pagerActive ? " hidden" : ""}`} style={{ paddingTop: "calc(0.75rem + 36px)" }}>
           <button
             onClick={() => setSidebarOpen((o) => !o)}
             title="Toggle sidebar (⌘B)"
-            className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            className="no-drag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
           >
             <PanelLeftIcon className="size-4" />
           </button>
 
-          <span className="flex items-center gap-2 font-mono text-[13px] text-foreground">
+          <span className="no-drag flex items-center gap-2 font-mono text-[13px] text-foreground">
             {sessionLabel(active)}
             <span className="text-muted-foreground/40">/</span>
           </span>
@@ -1302,7 +1306,7 @@ function Daimon() {
 
           {/* Kubernetes context widget — only when k8s context is set. Hidden while powerline is on (powerline shows it instead). */}
           {showBadges && !showPowerline && k8sContext && (
-            <div className="flex items-center gap-2.5 rounded-md border border-border/40 bg-card/60 veil-surface px-2.5 py-1">
+            <div className="no-drag flex items-center gap-2.5 rounded-md border border-border/40 bg-card/60 veil-surface px-2.5 py-1">
               <img src={kubernetesIcon} alt="Kubernetes" className="size-3.5 shrink-0" />
               <div className="flex items-center gap-1.5 font-mono text-[11px]">
                 <span className="text-[#326DE6]/90 font-medium">{k8sContext}</span>
@@ -1316,7 +1320,7 @@ function Daimon() {
             </div>
           )}
 
-          <div className="ml-auto flex items-center gap-3">
+          <div className="no-drag ml-auto flex items-center gap-3">
             <span className="hidden font-mono text-[11px] tabular-nums text-muted-foreground sm:inline">
               {active.blocks.length} {active.blocks.length === 1 ? "run" : "runs"}
             </span>
@@ -1401,6 +1405,7 @@ function Daimon() {
       />
       <KeyboardShortcutsModal open={keysModalOpen} onClose={() => setKeysModalOpen(false)} />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} onTheme={setTheme} fontSize={fontSize} onFontSize={setFontSize} showBadges={showBadges} onShowBadges={setShowBadges} showPowerline={showPowerline} onShowPowerline={setShowPowerline} />
+      </div>
     </div>
     </PresentationModeContext.Provider>
   );
