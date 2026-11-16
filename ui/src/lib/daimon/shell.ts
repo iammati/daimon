@@ -174,8 +174,80 @@ for (let i = 0; i < 24; i++) {
   ANSI256.push(`#${v}${v}${v}`);
 }
 
+/**
+ * The text attributes in effect at some point of the output. SGR sequences add up — "\x1b[33m"
+ * then "\x1b[1m" is bold yellow — and stay in effect across newlines until reset, so this is
+ * carried from sequence to sequence and from line to line. Never mutated: sgrApply returns a copy.
+ */
+type Sgr = { fg: string; bg: string; bold: boolean; dim: boolean; italic: boolean; underline: boolean };
+const SGR_NONE: Sgr = { fg: "", bg: "", bold: false, dim: false, italic: false, underline: false };
+const SGR_RE = /\x1b\[([0-9;]*)m/g;
+
+/** `s` after one SGR sequence with the parameters `params` ("1;33"). */
+function sgrApply(s: Sgr, params: string): Sgr {
+  const codes = params.split(";").map(Number);   // "" → [0], a reset
+  const n = { ...s };
+  for (let i = 0; i < codes.length; i++) {
+    const c = codes[i]!;
+    if (c === 0) Object.assign(n, SGR_NONE);
+    else if (c === 1) n.bold = true;
+    else if (c === 2) n.dim = true;
+    else if (c === 3) n.italic = true;
+    else if (c === 4) n.underline = true;
+    else if (c === 22) n.bold = n.dim = false;
+    else if (c === 23) n.italic = false;
+    else if (c === 24) n.underline = false;
+    else if (c === 38 || c === 48) {
+      // 256-color (38;5;n) or truecolor (38;2;r;g;b)
+      const len = codes[i + 1] === 5 ? 3 : codes[i + 1] === 2 ? 5 : 0;
+      if (len && codes[i + len - 1] !== undefined) {
+        const v = codes.slice(i, i + len).join(";");
+        if (c === 38) n.fg = v; else n.bg = v;
+        i += len - 1;
+      }
+    }
+    else if ((c >= 30 && c <= 37) || (c >= 90 && c <= 97)) n.fg = String(c);
+    else if (c === 39) n.fg = "";
+    else if ((c >= 40 && c <= 47) || (c >= 100 && c <= 107)) n.bg = String(c);
+    else if (c === 49) n.bg = "";
+  }
+  return n;
+}
+
+/** The one SGR sequence that turns a reset terminal into `s` ("" for no attributes). */
+function sgrSeq(s: Sgr): string {
+  const p: string[] = [];
+  if (s.bold) p.push("1");
+  if (s.dim) p.push("2");
+  if (s.italic) p.push("3");
+  if (s.underline) p.push("4");
+  if (s.fg) p.push(s.fg);
+  if (s.bg) p.push(s.bg);
+  return p.length ? `\x1b[${p.join(";")}m` : "";
+}
+
+/** A color as sgrApply stored it ("33", "92", "38;5;208", "48;2;1;2;3") → CSS. */
+function sgrColor(v: string, fallback: string): string {
+  const p = v.split(";").map(Number);
+  if (p.length === 1) return ANSI16[(p[0]! % 10) + (p[0]! >= 90 ? 8 : 0)]!;
+  if (p[1] === 5) return ANSI256[p[2]!] ?? fallback;
+  return `rgb(${p[2]},${p[3]},${p[4]})`;
+}
+
+function sgrCss(s: Sgr): string {
+  let style = "";
+  if (s.bold) style += "font-weight:600;";
+  if (s.dim) style += "opacity:0.7;";
+  if (s.italic) style += "font-style:italic;";
+  if (s.underline) style += "text-decoration:underline;";
+  if (s.fg) style += `color:${sgrColor(s.fg, "#ccc")};`;
+  if (s.bg) style += `background:${sgrColor(s.bg, "#333")};`;
+  return style;
+}
+
 /** The span/link left open at the end of a piece of text, so output can be converted in pieces. */
-type AnsiHtmlState = { open: boolean; curStyle: string; linkOpen: boolean };
+type AnsiHtmlState = { open: boolean; curStyle: string; linkOpen: boolean; sgr: Sgr };
+const newAnsiHtmlState = (): AnsiHtmlState => ({ open: false, curStyle: "", linkOpen: false, sgr: SGR_NONE });
 const ansiHtmlClose = (st: AnsiHtmlState) => (st.open ? "</span>" : "") + (st.linkOpen ? "</a>" : "");
 
 /** Convert one piece of text, continuing from `st`. Close with ansiHtmlClose() after the last piece. */
@@ -191,7 +263,7 @@ function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f]/g, "");
 
   let out = "";
-  let { open, curStyle, linkOpen } = st;
+  let { open, curStyle, linkOpen, sgr } = st;
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   // SGR, or an OSC 8 hyperlink open (with URL) / close (empty URL)
   const re = /\x1b\[([0-9;]*)m|\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
@@ -212,58 +284,19 @@ function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
       if (open) out += `<span style="${curStyle}">`;
       continue;
     }
-    const codes = (m[1] ?? "").split(";").map(Number);
-    let style = "";
-    let i = 0;
-    while (i < codes.length) {
-      const c = codes[i]!;
-      if (c === 0) { style = ""; }
-      else if (c === 1) { style += "font-weight:600;"; }
-      else if (c === 2) { style += "opacity:0.7;"; }
-      else if (c === 3) { style += "font-style:italic;"; }
-      else if (c === 4) { style += "text-decoration:underline;"; }
-      else if (c >= 30 && c <= 37) { style += `color:${ANSI16[c - 30]};`; }
-      else if (c === 38) {
-        if (codes[i+1] === 5 && codes[i+2] !== undefined) {
-          // 256-color foreground
-          style += `color:${ANSI256[codes[i+2]!] ?? "#ccc"};`;
-          i += 2;
-        } else if (codes[i+1] === 2 && codes[i+4] !== undefined) {
-          // Truecolor foreground: 38;2;r;g;b
-          const [,, r, g, b] = codes.slice(i, i + 5);
-          style += `color:rgb(${r},${g},${b});`;
-          i += 4;
-        }
-      }
-      else if (c === 39) { style += "color:inherit;"; }
-      else if (c >= 40 && c <= 47) { style += `background:${ANSI16[c - 40]};`; }
-      else if (c === 48) {
-        if (codes[i+1] === 5 && codes[i+2] !== undefined) {
-          // 256-color background
-          style += `background:${ANSI256[codes[i+2]!] ?? "#333"};`;
-          i += 2;
-        } else if (codes[i+1] === 2 && codes[i+4] !== undefined) {
-          // Truecolor background: 48;2;r;g;b
-          const [,, r, g, b] = codes.slice(i, i + 5);
-          style += `background:rgb(${r},${g},${b});`;
-          i += 4;
-        }
-      }
-      else if (c >= 90 && c <= 97) { style += `color:${ANSI16[c - 90 + 8]};`; }
-      else if (c >= 100 && c <= 107) { style += `background:${ANSI16[c - 100 + 8]};`; }
-      i++;
-    }
+    sgr = sgrApply(sgr, m[1] ?? "");
+    const style = sgrCss(sgr);
     if (open) { out += "</span>"; open = false; }
     if (style) { out += `<span style="${style}">`; open = true; }
     curStyle = style;
   }
   out += esc(s.slice(last));
-  st.open = open; st.curStyle = curStyle; st.linkOpen = linkOpen;
+  st.open = open; st.curStyle = curStyle; st.linkOpen = linkOpen; st.sgr = sgr;
   return out;
 }
 
 function ansiToHtml(raw: string): string {
-  const st: AnsiHtmlState = { open: false, curStyle: "", linkOpen: false };
+  const st = newAnsiHtmlState();
   const out = ansiHtmlChunk(raw, st);
   return out + ansiHtmlClose(st);
 }
@@ -295,12 +328,20 @@ function stripPromptLines(text: string): string {
 const LINE_CTRL_RE = /[\r\x08]|\x1b\[\d*[KGCD]/;
 const LINE_TOKEN_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[^[\]]|[\r\x08]|[\s\S]/gu;
 
-function renderTermLine(line: string): string {
-  if (!LINE_CTRL_RE.test(line)) return line;
+/** The attributes in effect at the end of the previous line; renderTermLine moves it on. */
+type SgrCarry = { sgr: Sgr };
+
+function renderTermLine(line: string, carry: SgrCarry): string {
+  if (!LINE_CTRL_RE.test(line)) {
+    if (line.includes("\x1b[")) for (const m of line.matchAll(SGR_RE)) carry.sgr = sgrApply(carry.sgr, m[1]!);
+    return line;
+  }
   type Cell = { ch: string; style: string; pre: string };
   const cells: Cell[] = [];
   let col = 0;
-  let style = "";   // accumulated SGR since last reset
+  let sgr = carry.sgr;
+  const start = sgrSeq(sgr);   // what the text before this line left switched on
+  let style = start;           // the SGR sequence for the attributes in effect
   let pre = "";     // non-SGR escapes (OSC 8 links etc.) carried onto the next cell
   const blank = (): Cell => ({ ch: " ", style: "", pre: "" });
   for (const m of line.matchAll(LINE_TOKEN_RE)) {
@@ -311,7 +352,7 @@ function renderTermLine(line: string): string {
       const final = t[t.length - 1]!;
       const arg = t.slice(2, -1);
       const n = parseInt(arg, 10);
-      if (final === "m") { style = arg === "" || arg === "0" ? "" : style + t; continue; }
+      if (final === "m" && !arg.includes("?")) { sgr = sgrApply(sgr, arg); style = sgrSeq(sgr); continue; }
       if (final === "K") {
         if (!arg || arg === "0") cells.length = Math.min(cells.length, col);
         else if (arg === "1") for (let i = 0; i <= col && i < cells.length; i++) cells[i] = blank();
@@ -331,19 +372,22 @@ function renderTermLine(line: string): string {
     col++;
   }
   let out = "";
-  let cur = "";
+  let cur = start;
   for (const c of cells) {
     if (c.style !== cur) { out += "\x1b[0m" + c.style; cur = c.style; }
     out += c.pre + c.ch;
   }
-  if (cur) out += "\x1b[0m";
+  // Leave the attributes as the line left them: a color opened here runs on into the next lines.
+  if (cur !== style) out += "\x1b[0m" + style;
+  carry.sgr = sgr;
   return out + pre;
 }
 
 /** Collapse in-place redraws so each logical line keeps only what a terminal would show. */
 export function normalizeTerminal(raw: string): string {
   if (!LINE_CTRL_RE.test(raw)) return raw;
-  return raw.replace(/\r+\n/g, "\n").split("\n").map(renderTermLine).join("\n");
+  const carry: SgrCarry = { sgr: SGR_NONE };
+  return raw.replace(/\r+\n/g, "\n").split("\n").map((l) => renderTermLine(l, carry)).join("\n");
 }
 
 /**
@@ -626,7 +670,7 @@ function backspaceUnderflows(l: string): boolean {
   return false;
 }
 // Line endings are "\r\n" on a PTY; normalizeTerminal drops that "\r" before collapsing redraws.
-const renderLine = (l: string) => renderTermLine(l.replace(/\r+$/, ""));
+const renderLine = (l: string, carry: SgrCarry) => renderTermLine(l.replace(/\r+$/, ""), carry);
 const isBlank = (l: string) => l.trim() === "";
 
 /** Drop blank lines at the given ends and trim the lines left there — String.trim() on a line list. */
@@ -654,13 +698,14 @@ class OutputStream {
   // Finished lines, redraws collapsed. Everything below reads from here.
   private done: string[] = [];
   private color = false;
+  private carry: SgrCarry = { sgr: SGR_NONE };   // attributes at the end of the last line in `done`
   private first = -1;           // first / last non-blank index in `done`
   private last = -1;
 
   // Colored output → html (or a colored diff → its plain text).
   private aNext = 0;
   private aHtml = "";
-  private aState: AnsiHtmlState = { open: false, curStyle: "", linkOpen: false };
+  private aState = newAnsiHtmlState();
   private aText = "";           // escape-free text of the finished lines, until `diff` is settled
   private aFirst = -1;          // first / last index in `done` with printable text
   private aLast = -1;
@@ -710,7 +755,8 @@ class OutputStream {
     if (!this.visible && !(tailKept && tailText)) return [];
 
     // The unfinished end: held lines plus the partial last line, trimmed as the end of the text.
-    const open = trimLines(tailKept ? [...this.held, tail] : this.held, !this.started).map(renderLine);
+    const carry: SgrCarry = { sgr: this.carry.sgr };
+    const open = trimLines(tailKept ? [...this.held, tail] : this.held, !this.started).map((l) => renderLine(l, carry));
     if (!open.length) return [];
     for (let i = 0; i < open.length; i++) {
       if (open[i]!.includes("\x08") || (i < open.length - 1 && hasOpenOsc(open[i]!))) return parseOutput(raw, this.input);
@@ -725,7 +771,7 @@ class OutputStream {
     if (text === this.cmd || PROMPT_RE.test(text)) return;   // command echo / prompt line
     if (text) this.visible = true;
     if (isBlank(l)) { if (this.started) this.held.push(l); return; }
-    for (const h of this.held) this.addDone(renderLine(h));
+    for (const h of this.held) this.addDone(renderLine(h, this.carry));
     this.held = [this.started ? l : l.trimStart()];
     this.started = true;
   }
