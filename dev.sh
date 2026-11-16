@@ -216,6 +216,8 @@ if [ "$WIN_NATIVE" = 0 ]; then
 cd "$ROOT/app"
 log "building Electrobun app..."
 node node_modules/electrobun/bin/electrobun.cjs build
+# Copy native drag dylib into the bundle (electrobun bundles src/bun/ as index.js, not as files).
+cp "$ROOT/app/src/bun/libDaimonDrag.dylib" "$ROOT/app/build/dev-macos-arm64/daimon2-dev.app/Contents/Resources/app/bun/libDaimonDrag.dylib" 2>/dev/null || true
 
 log "launching Electrobun app..."
 node node_modules/electrobun/bin/electrobun.cjs run &
