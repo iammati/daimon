@@ -23,7 +23,8 @@ const base: React.CSSProperties = {
   WebkitUserSelect: "none", userSelect: "none",
 };
 
-export function TitleBar() {
+/** `left`: content for the top-left corner of the Windows caption (as wide as the sidebar). Its buttons need `no-drag`. */
+export function TitleBar({ left }: { left?: React.ReactNode }) {
   const custom = document.documentElement.classList.contains("custom-frame");
   const [maximized, setMaximized] = useState(false);
 
@@ -38,7 +39,21 @@ export function TitleBar() {
   if (!custom) return <div className="titlebar-drag electrobun-webkit-app-region-drag" style={base} />;
 
   return (
-    <div className="titlebar-drag flex justify-end" style={base}>
+    <div
+      className="titlebar-drag flex justify-between"
+      style={base}
+      // The strip overlays the top of the page. Where page content under it opts out of dragging
+      // (`no-drag`), Windows hands the click to the webview — but it lands on this strip, so
+      // pass it down to the control underneath.
+      onMouseDown={(e) => {
+        if (e.target !== e.currentTarget || e.button !== 0) return;
+        const under = document.elementsFromPoint(e.clientX, e.clientY).find((el) => !e.currentTarget.contains(el));
+        const control = under?.closest<HTMLElement>("input, textarea, button, a, [role='button']");
+        if (!control) return;
+        e.preventDefault();
+        if (control.matches("input, textarea")) control.focus(); else control.click();
+      }}
+    >
       {/* The top resize border went to the client area with the caption. */}
       {!maximized && (
         <div
@@ -46,6 +61,7 @@ export function TitleBar() {
           onMouseDown={(e) => { if (e.button === 0) { e.preventDefault(); sendWindow("resize-top"); } }}
         />
       )}
+      {left ? <div className="relative flex h-full w-56 shrink-0 items-center justify-between px-5">{left}</div> : <div />}
       <div className="no-drag relative flex h-full">
         <WindowButton label="Minimize" onClick={() => sendWindow("minimize")}>
           <path d="M0.5 5.5h9" />

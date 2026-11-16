@@ -248,6 +248,7 @@ function Daimon() {
           cwd: r.cwd.split("/").filter(Boolean),
           ctx: r.ctx,
           at: new Date(r.ts).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+          ts: r.ts,
           ms: 0,
           code: r.exit_code,
           out: (() => { try { return JSON.parse(r.output_json); } catch { return []; } })(),
@@ -836,7 +837,7 @@ function Daimon() {
     const pendingId = Math.random().toString(36).slice(2);
     setSessions((prev) => prev.map((s) => s.id === sessionId ? {
       ...s,
-      blocks: [...s.blocks, { id: pendingId, input: cmd, cwd: s.state.cwd, ctx: s.state.ctx.name, at: now(), ms: 0, code: 0, out: [], pending: true }],
+      blocks: [...s.blocks, { id: pendingId, input: cmd, cwd: s.state.cwd, ctx: s.state.ctx.name, at: now(), ts: resume?.startedAt || Date.now(), ms: 0, code: 0, out: [], pending: true }],
     } : s));
 
     const runPromise = run(cmd, state, sessionId, (updated) => {
@@ -857,7 +858,7 @@ function Daimon() {
           input: block.input,
           cwd: Array.isArray(block.cwd) ? "/" + block.cwd.join("/") : (block.cwd ?? ""),
           ctx: block.ctx ?? "",
-          ts: Date.now(),
+          ts: block.ts ?? Date.now(),
           exit_code: block.code ?? 0,
           output_json: JSON.stringify(block.out ?? []),
         }).catch(() => {});
@@ -1050,40 +1051,48 @@ function Daimon() {
     return () => clearTimeout(t);
   }, [globalSearchQuery]);
 
+  // Windows draws its own caption (html.custom-frame); the wordmark row lives in it there.
+  const customFrame = document.documentElement.classList.contains("custom-frame");
+  const wordmark = (
+    <>
+      <span className="flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-sidebar-foreground">
+        <span className="text-sidebar-foreground/40">›_</span>
+        daimon
+        <span className="text-amber">.</span>
+      </span>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={cycleTheme}
+          title={`Theme: ${theme} — click to cycle`}
+          className="no-drag rounded-md p-1.5 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+        >
+          {THEME_ICONS[theme]}
+        </button>
+        <button
+          onClick={newTab}
+          className="no-drag rounded-md p-1.5 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+          title="New session (⌘T)"
+        >
+          <PlusIcon className="size-3.5" />
+        </button>
+      </div>
+    </>
+  );
+
   return (
     <PresentationModeContext.Provider value={presentationMode}>
     <div className="flex flex-col h-screen bg-transparent text-foreground overflow-hidden">
       <Toaster position="top-center" />
 
-      <TitleBar />
+      <TitleBar left={sidebarOpen ? wordmark : null} />
 
       <div className="flex flex-1 overflow-hidden">
       {/* Sidebar */}
       <aside className={`shrink-0 flex-col border-r border-border bg-sidebar/70 glass chrome-surface lg:flex transition-all duration-200 overflow-hidden ${sidebarOpen ? "w-56" : "w-0 border-r-0"}`}>
-        {/* Wordmark */}
-        <div className="flex items-center justify-between px-5 pb-4" style={{ paddingTop: "calc(1.25rem + 36px)" }}>
-          <span className="flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-sidebar-foreground">
-            <span className="text-sidebar-foreground/40">›_</span>
-            daimon
-            <span className="text-amber">.</span>
-          </span>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={cycleTheme}
-              title={`Theme: ${theme} — click to cycle`}
-              className="rounded-md p-1.5 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-            >
-              {THEME_ICONS[theme]}
-            </button>
-            <button
-              onClick={newTab}
-              className="rounded-md p-1.5 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-              title="New session (⌘T)"
-            >
-              <PlusIcon className="size-3.5" />
-            </button>
-          </div>
-        </div>
+        {/* Wordmark — on Windows it sits in the caption strip (top-left corner) instead, see TitleBar's `left` */}
+        {customFrame
+          ? <div style={{ height: 36 + 12 }} />
+          : <div className="flex items-center justify-between px-5 pb-4" style={{ paddingTop: "calc(1.25rem + 36px)" }}>{wordmark}</div>}
 
         {/* Sessions */}
         <div className="flex-1 overflow-y-auto px-3 pb-4">

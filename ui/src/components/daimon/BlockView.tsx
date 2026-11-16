@@ -727,10 +727,13 @@ function FullscreenPager({
       <span ref={sentinelRef} style={{ display: "none" }} />
       {container && createPortal(
     <div ref={overlayRef} className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background pager-overlay font-mono text-[13px]`}>
-      <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0">
+      {/* Title row: exactly the height of the window's drag strip (TitleBar) that overlays it,
+          and on Windows the caption buttons sit over its right end — so keep it short. The
+          search box is `no-drag`; TitleBar forwards clicks through to it. Key hints: bottom bar. */}
+      <div className="flex h-9 shrink-0 items-center gap-3 whitespace-nowrap border-b border-border px-4">
         <span className="text-muted-foreground/60">{title}</span>
         {headerMeta}
-        <div className="relative ml-2">
+        <div className="no-drag relative ml-2">
           <input
             ref={searchRef}
             value={search}
@@ -741,7 +744,10 @@ function FullscreenPager({
             className="w-48 rounded border border-line/40 bg-card px-2 py-0.5 font-mono text-[12px] text-foreground outline-none placeholder:text-muted-foreground/40 focus:border-signal/50"
           />
         </div>
-        <span className="ml-auto flex items-center gap-4 text-[11px] text-muted-foreground/60">
+      </div>
+      {typeof children === "function" ? (children as (search: string) => React.ReactNode)(search) : children}
+      <div className="flex shrink-0 items-center border-t border-border px-4 py-2">
+        <span className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground/60">
           <PagerHint keys={["↑↓", "jk"]} label="navigate" />
           <PagerHint keys={["⇧↑↓"]} label="scroll" />
           <PagerHint keys={["←→", "hl"]} label="expand" />
@@ -750,7 +756,6 @@ function FullscreenPager({
           <PagerHint keys={["q", "⌘C"]} label="exit" />
         </span>
       </div>
-      {typeof children === "function" ? (children as (search: string) => React.ReactNode)(search) : children}
     </div>,
     container
       )}
@@ -928,6 +933,48 @@ function humanSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}M`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}G`;
+}
+
+const fmtDuration = (ms: number) => {
+  ms = Math.max(0, Math.round(ms));
+  if (ms < 1000) return `${ms} ms`;
+  const frac = String(ms % 1000).padStart(3, "0");
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}.${frac} s`;
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = String(sec % 60).padStart(2, "0");
+  return h ? `${h}h ${String(m).padStart(2, "0")}m ${s}.${frac}s` : `${m}m ${s}.${frac}s`;
+};
+
+/** Tooltip for a block's start time: full local date-time with zone, then the same instant in UTC. */
+function stampTitle(ts: number): string {
+  const d = new Date(ts);
+  const zone = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(d).find((p) => p.type === "timeZoneName")?.value ?? "local";
+  return `${d.toLocaleString("sv-SE")} ${zone}\n${d.toISOString().slice(0, 19).replace("T", " ")} UTC`;
+}
+
+/**
+ * Block duration, to the millisecond. A running command repaints every animation frame off its
+ * start time (writing the text node directly, so the block itself doesn't re-render per frame).
+ */
+function BlockDuration({ block }: { block: Block }) {
+  const live = !!block.pending && !block.settled && block.ts != null;
+  const ts = block.ts;
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!live || ts == null) return;
+    let raf = 0;
+    const paint = () => {
+      if (ref.current) ref.current.textContent = fmtDuration(Date.now() - ts);
+      raf = requestAnimationFrame(paint);
+    };
+    paint();
+    return () => cancelAnimationFrame(raf);
+  }, [live, ts]);
+  // The loop above writes the text node behind React's back; resync once it stops.
+  useEffect(() => {
+    if (!live && ref.current) ref.current.textContent = fmtDuration(block.ms);
+  }, [live, block.ms]);
+  return <span ref={ref}>{fmtDuration(live && ts != null ? Date.now() - ts : block.ms)}</span>;
 }
 
 function PermBadge({ perms }: { perms: string }) {
@@ -2164,11 +2211,22 @@ function VirtualLines({ visibleLines, toneClass, search, pm, currentMatch, match
     overscan: 20,
   });
 
+  // Follow the output as it grows, until the user scrolls up; scrolling back to the end resumes.
+  const followRef = useRef(true);
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (el && followRef.current) el.scrollTop = el.scrollHeight;
+  }, [visibleLines.length]);
+
   return (
     <div
       ref={parentRef}
       className="overflow-auto"
       style={{ maxHeight: "60vh" }}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        followRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+      }}
     >
       <div
         className={`relative font-mono text-[13px] leading-6 whitespace-pre-wrap ${toneClass}`}
@@ -2726,8 +2784,8 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
         )}
         <span className="ml-auto flex items-center gap-3 font-mono text-[11px] tabular-nums text-muted-foreground/70">
           {failed && <span className="text-alarm/80">exit {block.code}</span>}
-          <span>{block.ms} ms</span>
-          <span>{block.at}</span>
+          <BlockDuration block={block} />
+          <span title={block.ts ? stampTitle(block.ts) : undefined}>{block.at}</span>
           {block.out.length > 0 && (
             <button
               onClick={copyOutput}

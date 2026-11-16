@@ -47,7 +47,11 @@ export type Block = {
   cwd: string[];
   ctx: string;
   at: string;
+  /** Epoch ms the command started. Absent on blocks built before this field existed. */
+  ts?: number;
   ms: number;
+  /** Set once the command has ended but the block is still finalising: `ms` is final, stop ticking. */
+  settled?: boolean;
   code: number;
   out: Out[];
   pending?: boolean;
@@ -133,6 +137,7 @@ export function abandonRun(tabId: string) {
 
 // Apply backspace
 function applyBackspace(s: string): string {
+  if (!s.includes("\x08")) return s;
   let out = "";
   for (const ch of s) {
     if (ch === "\x08") out = out.slice(0, -1);
@@ -142,7 +147,8 @@ function applyBackspace(s: string): string {
 }
 
 const ANSI = (s: string) =>
-  applyBackspace(s)
+  // Nothing to strip without a control character (tab and newline are kept).
+  !/[\x00-\x08\x0b-\x1f]/.test(s) ? s : applyBackspace(s)
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b[()][AB012B]/g, "")
@@ -168,7 +174,12 @@ for (let i = 0; i < 24; i++) {
   ANSI256.push(`#${v}${v}${v}`);
 }
 
-function ansiToHtml(raw: string): string {
+/** The span/link left open at the end of a piece of text, so output can be converted in pieces. */
+type AnsiHtmlState = { open: boolean; curStyle: string; linkOpen: boolean };
+const ansiHtmlClose = (st: AnsiHtmlState) => (st.open ? "</span>" : "") + (st.linkOpen ? "</a>" : "");
+
+/** Convert one piece of text, continuing from `st`. Close with ansiHtmlClose() after the last piece. */
+function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
   const s = applyBackspace(raw)
     .replace(/\x1b\](?!8;)[^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC 8 (hyperlinks) handled below
     .replace(/(\x1b\]8;[^\x07\x1b]*)\x07/g, "$1\x1b\\")              // …BEL-terminated → ST, so the control-char strip keeps them whole
@@ -180,9 +191,7 @@ function ansiToHtml(raw: string): string {
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f]/g, "");
 
   let out = "";
-  let open = false;
-  let curStyle = "";
-  let linkOpen = false;
+  let { open, curStyle, linkOpen } = st;
   const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   // SGR, or an OSC 8 hyperlink open (with URL) / close (empty URL)
   const re = /\x1b\[([0-9;]*)m|\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
@@ -249,9 +258,14 @@ function ansiToHtml(raw: string): string {
     curStyle = style;
   }
   out += esc(s.slice(last));
-  if (open) out += "</span>";
-  if (linkOpen) out += "</a>";
+  st.open = open; st.curStyle = curStyle; st.linkOpen = linkOpen;
   return out;
+}
+
+function ansiToHtml(raw: string): string {
+  const st: AnsiHtmlState = { open: false, curStyle: "", linkOpen: false };
+  const out = ansiHtmlChunk(raw, st);
+  return out + ansiHtmlClose(st);
 }
 
 // Returns true if the string contains ANSI color/style escape sequences or OSC 8
@@ -338,45 +352,159 @@ export function normalizeTerminal(raw: string): string {
  * structurally YAML: `key: value` (key without spaces), `- item`, `---`, or an indented continuation.
  */
 export function looksLikeYaml(text: string): boolean {
-  const lines = text.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
-  if (lines.length < 3) return false;
-  const keyRe = /^(\s*)(?:- )?(["']?)[\w./-]+\2:(?:\s+(.*))?$/;
-  const itemRe = /^\s*- \S/;
-  const docRe = /^(?:---|\.\.\.)\s*$/;
+  const st = newYamlScan();
+  for (const l of text.split("\n")) yamlFeed(st, l);
+  return yamlVerdict(st);
+}
+
+/** looksLikeYaml's running state, so streaming output can be checked a line at a time. */
+type YamlScan = {
   // Keys seen per indent level within the current mapping. A mapping can't repeat a key, so
   // "remote: …" / "remote: …" or "error: …" / "error: …" is prose, not YAML.
-  const seen = new Map<number, Set<string>>();
+  seen: Map<number, Set<string>>;
+  keys: number; structural: number; count: number;
+  bad: boolean;
+};
+const newYamlScan = (): YamlScan => ({ seen: new Map(), keys: 0, structural: 0, count: 0, bad: false });
+const cloneYamlScan = (st: YamlScan): YamlScan =>
+  ({ ...st, seen: new Map([...st.seen].map(([k, v]) => [k, new Set(v)])) });
+const yamlVerdict = (st: YamlScan) =>
+  !st.bad && st.count >= 3 && st.keys >= 2 && st.structural / st.count >= 0.9;
+
+const YAML_KEY_RE = /^(\s*)(?:- )?(["']?)[\w./-]+\2:(?:\s+(.*))?$/;
+const YAML_ITEM_RE = /^\s*- \S/;
+const YAML_DOC_RE = /^(?:---|\.\.\.)\s*$/;
+
+function yamlFeed(st: YamlScan, l: string): void {
+  if (st.bad || !l.trim() || /^\s*#/.test(l)) return;
+  st.count++;
+  const seen = st.seen;
   const resetFrom = (indent: number) => { for (const k of [...seen.keys()]) if (k >= indent) seen.delete(k); };
-  let keys = 0, structural = 0;
-  for (const l of lines) {
-    if (docRe.test(l)) { seen.clear(); structural++; continue; }
-    const m = keyRe.exec(l);
-    if (m) {
-      const value = m[3] ?? "";
-      // Unquoted values can't contain ": " in YAML — that's prose like "remote: Resolving deltas: 100%".
-      if (!/^["'{[|>]/.test(value) && /:\s/.test(value)) return false;
-      const isItem = /^\s*- /.test(l);
-      const indent = m[1]!.length + (isItem ? 2 : 0);
-      if (isItem) resetFrom(indent);       // "- key:" starts a fresh mapping
-      else resetFrom(indent + 1);          // leaving deeper mappings
-      const name = l.slice(0, l.indexOf(":")).replace(/^\s*(?:- )?["']?/, "").replace(/["']$/, "");
-      const set = seen.get(indent) ?? new Set<string>();
-      if (set.has(name)) return false;
-      set.add(name);
-      seen.set(indent, set);
-      keys++; structural++;
-    } else if (itemRe.test(l)) {
-      resetFrom(l.search(/\S/));
-      structural++;
-    } else if (/^\s+\S/.test(l)) {
-      structural++;
-    }
+  if (YAML_DOC_RE.test(l)) { seen.clear(); st.structural++; return; }
+  const m = YAML_KEY_RE.exec(l);
+  if (m) {
+    const value = m[3] ?? "";
+    // Unquoted values can't contain ": " in YAML — that's prose like "remote: Resolving deltas: 100%".
+    if (!/^["'{[|>]/.test(value) && /:\s/.test(value)) { st.bad = true; return; }
+    const isItem = /^\s*- /.test(l);
+    const indent = m[1]!.length + (isItem ? 2 : 0);
+    if (isItem) resetFrom(indent);       // "- key:" starts a fresh mapping
+    else resetFrom(indent + 1);          // leaving deeper mappings
+    const name = l.slice(0, l.indexOf(":")).replace(/^\s*(?:- )?["']?/, "").replace(/["']$/, "");
+    const set = seen.get(indent) ?? new Set<string>();
+    if (set.has(name)) { st.bad = true; return; }
+    set.add(name);
+    seen.set(indent, set);
+    st.keys++; st.structural++;
+  } else if (YAML_ITEM_RE.test(l)) {
+    resetFrom(l.search(/\S/));
+    st.structural++;
+  } else if (/^\s+\S/.test(l)) {
+    st.structural++;
   }
-  return keys >= 2 && structural / lines.length >= 0.9;
 }
 
 // OSC 1337 imgcat: ESC ] 1337 ; File=inline=1[;...] : <base64> BEL
 const OSC1337_RE = /\x1b\]1337;File=[^\x07\x1b]*:([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)/g;
+
+// ── Output classifiers ─────────────────────────────────────────────────────
+// Shared by parse() (whole text) and OutputStream (a line at a time).
+
+/** Unified/git diff, judged on the first few lines of the text. */
+const looksLikeDiff = (firstLines: string) =>
+  /^(diff --git |--- [^\n]+\n\+\+\+ )/m.test(firstLines) || /^@@\s+-\d/m.test(firstLines);
+
+/** JSON text → table / pairs / pretty block; null when it isn't valid JSON. */
+function jsonOut(text: string): Out[] | null {
+  try {
+    const val = JSON.parse(text);
+    if (Array.isArray(val) && val.length > 0 && typeof val[0] === "object" && val[0] !== null) {
+      // Check if flat (all values are primitives)
+      const isFlat = val.every((row: unknown) =>
+        typeof row === "object" && row !== null &&
+        Object.values(row as Record<string, unknown>).every((v) => v === null || typeof v !== "object")
+      );
+      if (isFlat) {
+        const head = Object.keys(val[0]!);
+        const rows = val.map((row: Record<string, unknown>) => head.map((k) => String(row[k] ?? "")));
+        return [{ kind: "table", head, rows }];
+      }
+      // Nested array of objects -> pretty
+      return [{ kind: "pretty", format: "json", text: JSON.stringify(val, null, 2) }];
+    }
+    if (typeof val === "object" && !Array.isArray(val)) {
+      // Check if flat (all values are primitives)
+      const isFlat = Object.values(val as Record<string, unknown>).every((v) => v === null || typeof v !== "object");
+      if (isFlat) {
+        return [{ kind: "pairs", pairs: Object.entries(val as Record<string, unknown>).map(([k, v]) => [k, String(v)] as [string, string]) }];
+      }
+      // Nested object -> pretty
+      return [{ kind: "pretty", format: "json", text: JSON.stringify(val, null, 2) }];
+    }
+    // Other valid JSON (primitives, empty arrays) -> pretty
+    return [{ kind: "pretty", format: "json", text: JSON.stringify(val, null, 2) }];
+  } catch {
+    return null;
+  }
+}
+
+const LS_ENTRY_RE = /^([dlcbsp-][rwx-]{9}[@+.]?)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\w{3})\s+(\d+)\s+(\d{2}:\d{2}|\d{4})\s+(.*)/;
+
+/** One `ls -l` line → entry; null for anything else. */
+function lsEntry(line: string): LsEntry | null {
+  const m = LS_ENTRY_RE.exec(line.trim());
+  if (!m) return null;
+  const nameRaw = m[9]!.trim();
+  const arrowIdx = nameRaw.indexOf(" -> ");
+  return {
+    perms: m[1]!, links: m[2]!, user: m[3]!, group: m[4]!,
+    size: parseInt(m[5]!, 10), month: m[6]!, day: m[7]!, time: m[8]!,
+    name: arrowIdx >= 0 ? nameRaw.slice(0, arrowIdx) : nameRaw,
+    ...(arrowIdx >= 0 ? { link: nameRaw.slice(arrowIdx + 4) } : {}),
+  };
+}
+
+/**
+ * Column names and start offsets of a table header line; null when the line isn't one.
+ * Position-based: find where each header word starts. This handles kubectl-style headers with
+ * multi-word column names like "NOMINATED NODE" and "READINESS GATES" that share a single space.
+ */
+function tableHeader(firstLine: string): { starts: number[]; names: string[] } | null {
+  // Skip help/usage text: section headers end with ":" or first line is indented
+  if (firstLine.trimStart() !== firstLine || firstLine.trimEnd().endsWith(":")) return null;
+  const starts: number[] = [];
+  const names: string[] = [];
+  // Runs of non-space chars separated by 2+ spaces give the column positions
+  const headerColRe = /\S[\S ]*?(?=\s{2}|\s*$)/g;
+  let hm: RegExpExecArray | null;
+  while ((hm = headerColRe.exec(firstLine)) !== null) {
+    starts.push(hm.index);
+    names.push(hm[0].trim());
+  }
+  return names.length >= 2 ? { starts, names } : null;
+}
+/** Slice a row by the header's column start positions. */
+const tableRow = (starts: number[], l: string) =>
+  starts.map((start, i) => l.slice(start, starts[i + 1] ?? l.length).trim());
+// Valid table: every row has a non-empty first cell and a second column
+const tableRowOk = (r: string[]) => !!r[0] && r[1] !== undefined;
+
+const LOGFMT_RE = /^(\w[\w.-]*)=("(?:[^"\\]|\\.)*"|\S*)/;
+/** One logfmt line → its key/value pairs; null with fewer than two pairs. */
+function logfmtLine(l: string): Record<string, string> | null {
+  const obj: Record<string, string> = {};
+  let rest = l.trim();
+  while (rest.length > 0) {
+    const m = LOGFMT_RE.exec(rest);
+    if (!m) break;
+    const k = m[1]!;
+    const raw = m[2]!;
+    obj[k] = raw.startsWith('"') ? raw.slice(1, -1).replace(/\\"/g, '"') : raw;
+    rest = rest.slice(m[0].length).trimStart();
+  }
+  return Object.keys(obj).length >= 2 ? obj : null;
+}
+const logfmtMarked = (l: string) => l.includes("time=") || l.includes("level=");
 
 function parse(rawText: string): Out[] {
   // Extract OSC 1337 imgcat sequences before any stripping
@@ -396,8 +524,7 @@ function parse(rawText: string): Out[] {
     const stripped = ANSI(cleaned).trim();
     if (!stripped) return [];
     // git diff produces colored output — detect on stripped text before falling back to ansi
-    const firstLines = stripped.split("\n").slice(0, 6).join("\n");
-    if (/^(diff --git |--- [^\n]+\n\+\+\+ )/m.test(firstLines) || /^@@\s+-\d/m.test(firstLines)) {
+    if (looksLikeDiff(stripped.split("\n").slice(0, 6).join("\n"))) {
       return [{ kind: "gitdiff", raw: stripped }];
     }
     return [{ kind: "ansi", html: ansiToHtml(cleaned).trim() }];
@@ -407,90 +534,26 @@ function parse(rawText: string): Out[] {
   if (!text) return [];
 
   if (text.startsWith("{") || text.startsWith("[")) {
-    try {
-      const val = JSON.parse(text);
-      if (Array.isArray(val) && val.length > 0 && typeof val[0] === "object" && val[0] !== null) {
-        // Check if flat (all values are primitives)
-        const isFlat = val.every((row: unknown) =>
-          typeof row === "object" && row !== null &&
-          Object.values(row as Record<string, unknown>).every((v) => v === null || typeof v !== "object")
-        );
-        if (isFlat) {
-          const head = Object.keys(val[0]!);
-          const rows = val.map((row: Record<string, unknown>) => head.map((k) => String(row[k] ?? "")));
-          return [{ kind: "table", head, rows }];
-        }
-        // Nested array of objects -> pretty
-        return [{ kind: "pretty", format: "json", text: JSON.stringify(val, null, 2) }];
-      }
-      if (typeof val === "object" && !Array.isArray(val)) {
-        // Check if flat (all values are primitives)
-        const isFlat = Object.values(val as Record<string, unknown>).every((v) => v === null || typeof v !== "object");
-        if (isFlat) {
-          return [{ kind: "pairs", pairs: Object.entries(val as Record<string, unknown>).map(([k, v]) => [k, String(v)] as [string, string]) }];
-        }
-        // Nested object -> pretty
-        return [{ kind: "pretty", format: "json", text: JSON.stringify(val, null, 2) }];
-      }
-      // Other valid JSON (primitives, empty arrays) -> pretty
-      return [{ kind: "pretty", format: "json", text: JSON.stringify(val, null, 2) }];
-    } catch { /**/ }
+    const json = jsonOut(text);
+    if (json) return json;
   }
 
   // ls -l / ls -la long-listing format:
   // optional "total N" header, then lines starting with permission chars [dlcbsp-][rwx-]{9}
   const lsLines = text.split("\n");
-  const lsEntryRe = /^([dlcbsp-][rwx-]{9}[@+.]?)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\w{3})\s+(\d+)\s+(\d{2}:\d{2}|\d{4})\s+(.*)/;
-  const lsDataLines = lsLines.filter((l) => lsEntryRe.test(l.trim()));
-  if (lsDataLines.length >= 2 || (lsDataLines.length >= 1 && lsLines[0]?.startsWith("total "))) {
+  const entries = lsLines.map(lsEntry).filter((e): e is LsEntry => e !== null);
+  if (entries.length >= 2 || (entries.length >= 1 && lsLines[0]?.startsWith("total "))) {
     const total = lsLines[0]?.startsWith("total ") ? lsLines[0].slice(6).trim() : "";
-    const entries: LsEntry[] = lsDataLines.map((l) => {
-      const m = lsEntryRe.exec(l.trim())!;
-      const nameRaw = m[9]!.trim();
-      const arrowIdx = nameRaw.indexOf(" -> ");
-      return {
-        perms: m[1]!, links: m[2]!, user: m[3]!, group: m[4]!,
-        size: parseInt(m[5]!, 10), month: m[6]!, day: m[7]!, time: m[8]!,
-        name: arrowIdx >= 0 ? nameRaw.slice(0, arrowIdx) : nameRaw,
-        ...(arrowIdx >= 0 ? { link: nameRaw.slice(arrowIdx + 4) } : {}),
-      };
-    });
     return [{ kind: "lslong", entries, total }];
   }
 
   const lines = text.split("\n");
   if (lines.length >= 2) {
-    const firstLine = lines[0]!;
-    // Skip help/usage text: section headers end with ":" or first line is indented
-    const looksLikeHelp = firstLine.trimStart() !== firstLine || firstLine.trimEnd().endsWith(":");
-    if (!looksLikeHelp) {
-      // Position-based column detection: find where each header word starts.
-      // This handles kubectl-style headers with multi-word column names like
-      // "NOMINATED NODE" and "READINESS GATES" that share a single space.
-      const colStarts: number[] = [];
-      const colNames: string[] = [];
-      const headerRe = /\S+(?:\s\S+)*/g; // greedy: match word groups separated by 2+ spaces
-      // Actually find runs of non-space chars separated by 2+ spaces to get column positions
-      const headerColRe = /\S[\S ]*?(?=\s{2}|\s*$)/g;
-      let hm: RegExpExecArray | null;
-      while ((hm = headerColRe.exec(firstLine)) !== null) {
-        colStarts.push(hm.index);
-        colNames.push(hm[0].trim());
-      }
-
-      if (colNames.length >= 2) {
-        // Slice each row by column start positions
-        const dataLines = lines.slice(1).filter(Boolean);
-        const rows = dataLines.map((l) => {
-          return colStarts.map((start, i) => {
-            const end = colStarts[i + 1] ?? l.length;
-            return l.slice(start, end).trim();
-          });
-        });
-        // Valid table: all rows have at least 2 non-empty cells in first 2 cols
-        if (rows.length > 0 && rows.every((r) => r[0] && r[1] !== undefined)) {
-          return [{ kind: "table", head: colNames, rows, accentCol: colNames.length - 1 }];
-        }
+    const head = tableHeader(lines[0]!);
+    if (head) {
+      const rows = lines.slice(1).filter(Boolean).map((l) => tableRow(head.starts, l));
+      if (rows.length > 0 && rows.every(tableRowOk)) {
+        return [{ kind: "table", head: head.names, rows, accentCol: head.names.length - 1 }];
       }
     }
   }
@@ -498,24 +561,11 @@ function parse(rawText: string): Out[] {
   // Logfmt: lines with key="value" or key=value pairs (at least time= and msg= or level=)
   {
     const logfmtLines = lines.filter((l) => l.trim().length > 0);
-    const logfmtRe = /^(\w[\w.-]*)=("(?:[^"\\]|\\.)*"|\S*)/;
-    const parsed = logfmtLines.map((l) => {
-      const obj: Record<string, string> = {};
-      let rest = l.trim();
-      while (rest.length > 0) {
-        const m = logfmtRe.exec(rest);
-        if (!m) break;
-        const k = m[1]!;
-        const raw = m[2]!;
-        obj[k] = raw.startsWith('"') ? raw.slice(1, -1).replace(/\\"/g, '"') : raw;
-        rest = rest.slice(m[0].length).trimStart();
-      }
-      return Object.keys(obj).length >= 2 ? obj : null;
-    });
+    const parsed = logfmtLines.map(logfmtLine);
     const matchCount = parsed.filter(Boolean).length;
     // Allow a few junk lines at the top (PTY echo, escape sequences) — need ≥3 logfmt lines and ≥50% match
     const hasLogfmt = matchCount >= 3 && matchCount >= logfmtLines.length * 0.5;
-    const hasTimestampOrLevel = logfmtLines.some((l) => l.includes("time=") || l.includes("level="));
+    const hasTimestampOrLevel = logfmtLines.some(logfmtMarked);
     if (hasLogfmt && hasTimestampOrLevel) {
       // Drop non-matching header lines, keep only parsed logfmt rows
       return [{ kind: "logfmt", lines: parsed.filter(Boolean) as Record<string, string>[] }];
@@ -523,8 +573,7 @@ function parse(rawText: string): Out[] {
   }
 
   // Unified diff output (cat *.diff / *.patch)
-  const firstLines = text.split("\n").slice(0, 6).join("\n");
-  if (/^(diff --git |--- [^\n]+\n\+\+\+ )/m.test(firstLines) || /^@@\s+-\d/m.test(firstLines)) {
+  if (looksLikeDiff(text.split("\n").slice(0, 6).join("\n"))) {
     return [{ kind: "gitdiff", raw: text }];
   }
 
@@ -533,12 +582,281 @@ function parse(rawText: string): Out[] {
   // Strip uniform leading whitespace (e.g. git branch `  branch-name` padding)
   const nonEmpty = lines.filter((l) => l.trim().length > 0);
   if (nonEmpty.length > 0) {
-    const minIndent = Math.min(...nonEmpty.map((l) => l.match(/^(\s*)/)?.[1]?.length ?? 0));
+    // A loop, not Math.min(...): spreading ~125k+ lines as arguments overflows the stack.
+    let minIndent = Infinity;
+    for (const l of nonEmpty) minIndent = Math.min(minIndent, l.match(/^(\s*)/)?.[1]?.length ?? 0);
     if (minIndent > 0) {
       return [{ kind: "lines", lines: lines.map((l) => l.slice(minIndent)) }];
     }
   }
   return [{ kind: "lines", lines }];
+}
+
+/** What a command's raw PTY text shows as: echo and prompt lines dropped, the rest parsed. */
+function parseOutput(raw: string, input: string): Out[] {
+  const stripped = stripPromptLines(stripEcho(ANSI(raw).trim(), input));
+  const forParse = stripPromptLines(stripEcho(raw, input));
+  const hasImg = /\x1b\]1337;File=/.test(forParse);
+  return (stripped || hasImg) ? parse(forParse) : [];
+}
+
+// ── Streaming parse ────────────────────────────────────────────────────────
+// parseOutput() re-reads the whole buffer, which is too slow to repeat every frame while a
+// command is still printing. OutputStream gives the same answer for the text received so far,
+// but does the per-line work (echo/prompt filtering, redraw collapsing, HTML conversion, the
+// classifiers) once per finished line and only re-reads the unfinished end.
+//
+// Text it can't split into lines safely — inline images, an escape sequence or a backspace
+// that reaches across a newline — makes it defer to parseOutput().
+
+const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const CSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
+/** An OSC that isn't closed on its own line (as ANSI() reads it), so it may run on into the next one. */
+const hasOpenOsc = (l: string) =>
+  l.includes("]") && l.includes("\x1b") &&
+  applyBackspace(l).replace(CSI_RE, "").replace(OSC_RE, "").includes("\x1b]");
+/** A backspace with nothing before it on its line — in the whole text it would eat the newline. */
+function backspaceUnderflows(l: string): boolean {
+  let n = 0;
+  for (let i = 0; i < l.length; i++) {
+    if (l.charCodeAt(i) !== 8) n++;
+    else if (n === 0) return true;
+    else n--;
+  }
+  return false;
+}
+// Line endings are "\r\n" on a PTY; normalizeTerminal drops that "\r" before collapsing redraws.
+const renderLine = (l: string) => renderTermLine(l.replace(/\r+$/, ""));
+const isBlank = (l: string) => l.trim() === "";
+
+/** Drop blank lines at the given ends and trim the lines left there — String.trim() on a line list. */
+function trimLines(lines: string[], start: boolean): string[] {
+  let a = 0;
+  let b = lines.length;
+  if (start) while (a < b && isBlank(lines[a]!)) a++;
+  while (b > a && isBlank(lines[b - 1]!)) b--;
+  const out = lines.slice(a, b);
+  if (!out.length) return out;
+  if (start) out[0] = out[0]!.trimStart();
+  out[out.length - 1] = out[out.length - 1]!.trimEnd();
+  return out;
+}
+
+class OutputStream {
+  private readonly cmd: string;
+  private complex = false;      // can't be split into lines; snapshot() defers to parseOutput()
+  private tail = "";            // raw text after the last newline
+  private visible = false;      // some kept line has printable text
+  private started = false;      // past the leading blank lines
+  // Kept raw lines whose final form isn't known yet: the last non-blank one and the blanks
+  // after it. They are trimmed away for as long as nothing printable follows them.
+  private held: string[] = [];
+  // Finished lines, redraws collapsed. Everything below reads from here.
+  private done: string[] = [];
+  private color = false;
+  private first = -1;           // first / last non-blank index in `done`
+  private last = -1;
+
+  // Colored output → html (or a colored diff → its plain text).
+  private aNext = 0;
+  private aHtml = "";
+  private aState: AnsiHtmlState = { open: false, curStyle: "", linkOpen: false };
+  private aText = "";           // escape-free text of the finished lines, until `diff` is settled
+  private aFirst = -1;          // first / last index in `done` with printable text
+  private aLast = -1;
+  private diff: boolean | null = null;
+
+  // Plain output: the lines of the trimmed text that can no longer change, and what each
+  // classifier has made of them.
+  private pNext = 0;
+  private lines: string[] = [];
+  private text = "";
+  private ls: LsEntry[] = [];
+  private head: { starts: number[]; names: string[] } | null = null;
+  private rows: string[][] | null = null;   // null once a row doesn't fit the header
+  private logfmt: Record<string, string>[] = [];
+  private logfmtSeen = 0;
+  private logfmtMark = false;
+  private yaml = newYamlScan();
+
+  constructor(private readonly input: string) {
+    this.cmd = input.trim();
+  }
+
+  push(data: string): void {
+    if (this.complex) return;
+    let i = data.indexOf("\n");
+    if (i < 0) { this.tail += data; return; }
+    let start = 0;
+    let line = this.tail + data.slice(0, i);
+    for (;;) {
+      this.addRaw(line);
+      if (this.complex) return;
+      start = i + 1;
+      i = data.indexOf("\n", start);
+      if (i < 0) break;
+      line = data.slice(start, i);
+    }
+    this.tail = data.slice(start);
+  }
+
+  /** The parsed output of everything pushed so far. `raw` is that same text, for the fallback. */
+  snapshot(raw: string): Out[] {
+    if (this.complex) return parseOutput(raw, this.input);
+    const tail = this.tail;
+    if (tail.includes("\x1b]1337;File=") || backspaceUnderflows(tail)) return parseOutput(raw, this.input);
+    const tailText = ANSI(tail).trim();
+    const tailKept = tailText !== this.cmd && !PROMPT_RE.test(tailText);
+    if (!this.visible && !(tailKept && tailText)) return [];
+
+    // The unfinished end: held lines plus the partial last line, trimmed as the end of the text.
+    const open = trimLines(tailKept ? [...this.held, tail] : this.held, !this.started).map(renderLine);
+    if (!open.length) return [];
+    for (let i = 0; i < open.length; i++) {
+      if (open[i]!.includes("\x08") || (i < open.length - 1 && hasOpenOsc(open[i]!))) return parseOutput(raw, this.input);
+    }
+    return this.color || open.some(hasColor) ? this.ansiOut(open) : this.plainOut(open);
+  }
+
+  /** One finished raw line. */
+  private addRaw(l: string): void {
+    if (l.includes("\x1b]1337;File=") || hasOpenOsc(l) || backspaceUnderflows(l)) { this.complex = true; return; }
+    const text = ANSI(l).trim();
+    if (text === this.cmd || PROMPT_RE.test(text)) return;   // command echo / prompt line
+    if (text) this.visible = true;
+    if (isBlank(l)) { if (this.started) this.held.push(l); return; }
+    for (const h of this.held) this.addDone(renderLine(h));
+    this.held = [this.started ? l : l.trimStart()];
+    this.started = true;
+  }
+
+  private addDone(r: string): void {
+    if (r.includes("\x08") || hasOpenOsc(r)) { this.complex = true; return; }
+    if (!this.color && hasColor(r)) this.color = true;
+    if (!isBlank(r)) {
+      if (this.first < 0) this.first = this.done.length;
+      this.last = this.done.length;
+    }
+    this.done.push(r);
+  }
+
+  private ansiOut(open: string[]): Out[] {
+    for (; this.aNext < this.done.length; this.aNext++) {
+      const r = this.done[this.aNext]!;
+      this.aHtml += ansiHtmlChunk(r + "\n", this.aState);
+      if (this.diff === false) continue;
+      const text = ANSI(r);
+      if (!isBlank(text)) {
+        if (this.aFirst < 0) this.aFirst = this.aNext;
+        this.aLast = this.aNext;
+      }
+      this.aText += text + "\n";
+    }
+    if (this.diff !== false) {
+      const text = (this.aText + open.map(ANSI).join("\n")).trim();
+      if (!text) return [];
+      const isDiff = this.diff ?? looksLikeDiff(text.split("\n", 6).join("\n"));
+      // Settled once the lines it is judged on can no longer be the (trimmed) end of the text.
+      if (this.aFirst >= 0 && this.aLast >= this.aFirst + 6) {
+        this.diff = isDiff;
+        if (!isDiff) this.aText = "";
+      }
+      if (isDiff) return [{ kind: "gitdiff", raw: text }];
+    }
+    const st = { ...this.aState };
+    const html = this.aHtml + ansiHtmlChunk(open.join("\n"), st) + ansiHtmlClose(st);
+    return [{ kind: "ansi", html: html.trim() }];
+  }
+
+  private plainOut(open: string[]): Out[] {
+    // Everything before the last non-blank finished line is final; that line may still turn
+    // out to be the end of the text (and lose its trailing whitespace), so it stays open.
+    if (this.first >= 0) {
+      if (this.pNext < this.first) this.pNext = this.first;
+      for (; this.pNext < this.last; this.pNext++) {
+        const r = this.done[this.pNext]!;
+        this.addLine(this.pNext === this.first ? r.trimStart() : r);
+      }
+    }
+    const lines = this.lines;
+    const end = trimLines(this.first >= 0 ? [...this.done.slice(this.last), ...open] : open, !lines.length);
+    if (!end.length) return [];
+    const count = lines.length + end.length;
+    const line0 = lines[0] ?? end[0]!;
+    const lastLine = end[end.length - 1]!;
+    const text = () => (lines.length ? this.text + "\n" : "") + end.join("\n");
+
+    // Valid JSON closes the bracket it opens with, so anything else needn't be tried.
+    if ((line0[0] === "{" && lastLine.endsWith("}")) || (line0[0] === "[" && lastLine.endsWith("]"))) {
+      const json = jsonOut(text());
+      if (json) return json;
+    }
+
+    const endLs = end.map(lsEntry).filter((e): e is LsEntry => e !== null);
+    const lsCount = this.ls.length + endLs.length;
+    const hasTotal = line0.startsWith("total ");
+    if (lsCount >= 2 || (lsCount >= 1 && hasTotal)) {
+      return [{ kind: "lslong", entries: [...this.ls, ...endLs], total: hasTotal ? line0.slice(6).trim() : "" }];
+    }
+
+    if (count >= 2) {
+      const head = lines.length ? this.head : tableHeader(line0);
+      const rows = lines.length ? this.rows : [];
+      if (head && rows) {
+        const endRows = (lines.length ? end : end.slice(1)).filter(Boolean).map((l) => tableRow(head.starts, l));
+        if (rows.length + endRows.length > 0 && endRows.every(tableRowOk)) {
+          return [{ kind: "table", head: head.names, rows: [...rows, ...endRows], accentCol: head.names.length - 1 }];
+        }
+      }
+    }
+
+    const endFilled = end.filter((l) => !isBlank(l));
+    const endLogfmt = endFilled.map(logfmtLine).filter((o): o is Record<string, string> => o !== null);
+    const matchCount = this.logfmt.length + endLogfmt.length;
+    if (matchCount >= 3 && matchCount >= (this.logfmtSeen + endFilled.length) * 0.5
+        && (this.logfmtMark || endFilled.some(logfmtMarked))) {
+      return [{ kind: "logfmt", lines: [...this.logfmt, ...endLogfmt] }];
+    }
+
+    const firstLines = lines.length >= 6 ? lines.slice(0, 6) : [...lines, ...end].slice(0, 6);
+    if (looksLikeDiff(firstLines.join("\n"))) return [{ kind: "gitdiff", raw: text() }];
+
+    if (!this.yaml.bad) {
+      // ponytail: copies the open mappings' keys every frame. Fine for real YAML (a handful of
+      // keys per level); one flat mapping with ~100k keys would want an undo log instead.
+      const scan = cloneYamlScan(this.yaml);
+      for (const l of end) yamlFeed(scan, l);
+      if (yamlVerdict(scan)) return [{ kind: "pretty", format: "yaml", text: text() }];
+    }
+
+    return [{ kind: "lines", lines: [...lines, ...end] }];
+  }
+
+  /** One more final line of the trimmed plain text. */
+  private addLine(l: string): void {
+    if (!this.lines.length) {
+      this.head = tableHeader(l);
+      this.rows = this.head ? [] : null;
+      this.text = l;
+    } else {
+      this.text += "\n" + l;
+      if (this.rows && l) {
+        const row = tableRow(this.head!.starts, l);
+        if (tableRowOk(row)) this.rows.push(row);
+        else this.rows = null;
+      }
+    }
+    this.lines.push(l);
+    const entry = lsEntry(l);
+    if (entry) this.ls.push(entry);
+    if (!isBlank(l)) {
+      this.logfmtSeen++;
+      const pairs = logfmtLine(l);
+      if (pairs) this.logfmt.push(pairs);
+      if (logfmtMarked(l)) this.logfmtMark = true;
+    }
+    yamlFeed(this.yaml, l);
+  }
 }
 
 // Notification config — call setNotifConfig() from the UI to configure
@@ -649,12 +967,12 @@ export async function run(
   const input = raw.trim();
 
   if (!input && !resume) {
-    const block: Block = { id: Math.random().toString(36).slice(2), input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: 0, code: 0, out: [] };
+    const block: Block = { id: Math.random().toString(36).slice(2), input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: 0, code: 0, out: [] };
     return { block, next: state };
   }
 
   if (!resume && input === "clear") {
-    const block: Block = { id: Math.random().toString(36).slice(2), input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: 0, code: 0, out: [] };
+    const block: Block = { id: Math.random().toString(36).slice(2), input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: 0, code: 0, out: [] };
     return { block, next: state, clear: true };
   }
 
@@ -666,9 +984,9 @@ export async function run(
     try {
       const gs = await shell.gitStatus(cwdStr);
       const out: Out[] = [{ kind: "gitstatus", ...gs }];
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 0, out }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 0, out }, next: state };
     } catch {
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
   if (!resume && /^git\s+log(\s|$)/.test(input)) {
@@ -677,9 +995,9 @@ export async function run(
     try {
       const entries = await shell.listLog(cwdStr, 2000);
       const out: Out[] = [{ kind: "gitlog", entries, cwd: cwdStr }];
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 0, out }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 0, out }, next: state };
     } catch {
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
   if (!resume && /^git\s+branch(\s+(-v|-vv|--list|-l))*\s*$/.test(input)) {
@@ -688,9 +1006,9 @@ export async function run(
     try {
       const res = await shell.listBranches(cwdStr);
       const out: Out[] = [{ kind: "gitbranches", ...res }];
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 0, out }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 0, out }, next: state };
     } catch {
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
   if (!resume && /^git\s+(--no-pager\s+)?diff(\s|$)/.test(input)) {
@@ -702,9 +1020,9 @@ export async function run(
       const args = extraArgs ? extraArgs.split(/\s+/) : [];
       const { raw } = await shell.gitDiff(cwdStr, args);
       const out: Out[] = raw.trim() ? [{ kind: "gitdiff", raw }] : [{ kind: "lines", lines: ["no changes"], tone: "muted" }];
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 0, out }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 0, out }, next: state };
     } catch {
-      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
+      return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
 
@@ -713,7 +1031,13 @@ export async function run(
   const effectiveInput = noPagerRewrite !== input ? noPagerRewrite : input;
 
   const t0 = resume?.startedAt || Date.now();
+  // Duration is measured from the shell's command-start marker to its end marker, not from
+  // when run() was called to when the block finished finalising (which adds a fixed delay).
+  let tStart = t0;
+  let tEnd: number | null = null;
+  const elapsed = () => Math.max(0, (tEnd ?? Date.now()) - tStart);
   let normalBuf = "";
+  const stream = new OutputStream(effectiveInput);
   let exitCode = 0;
   let finalCtx: ShellContext | null = null;
   const id = Math.random().toString(36).slice(2);
@@ -729,10 +1053,13 @@ export async function run(
   if (isInteractive) notifyAltScreen(tabId, true);
   if (isStreamingInteractive) inStreamingSessionMap.set(tabId, true);
 
-  const pendingBlock: Block = { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: 0, code: 0, out: [], pending: true };
+  const pendingBlock: Block = { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: t0, ms: 0, code: 0, out: [], pending: true };
   onProgress(pendingBlock);
 
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let progressTimer: ReturnType<typeof setTimeout> | null = null;
+  let progressFrame: number | null = null;
+  let progressQueued = false;
+  let progressHoldUntil = 0;
   let done = false;
   let commandWritten = !!resume;
   let commandStarted = !!resume;
@@ -758,15 +1085,35 @@ export async function run(
     if (warpInjectTimer) clearTimeout(warpInjectTimer);
     warpInjectTimer = setTimeout(injectWarpify, 600);
   };
+  // Show new output once per painted frame, however many chunks arrived in between.
+  const paintProgress = () => {
+    progressFrame = null;
+    progressQueued = false;
+    if (done) return;
+    const painted = performance.now();
+    onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf), pending: true });
+    // A big block can take longer than a frame to lay out. When that happens, leave the UI
+    // twice that long to itself before the next update so typing and scrolling stay smooth.
+    requestAnimationFrame(() => {
+      const cost = performance.now() - painted;
+      if (cost > 50) progressHoldUntil = performance.now() + Math.min(cost * 2, 1000);
+    });
+  };
+  const queueProgressFrame = () => {
+    progressTimer = null;
+    progressFrame = requestAnimationFrame(paintProgress);
+  };
   const emitProgress = () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => {
-      if (done) return;
-      const stripped = stripPromptLines(stripEcho(ANSI(normalBuf).trim(), effectiveInput));
-      const forParse = stripPromptLines(stripEcho(normalBuf, effectiveInput));
-      const hasImg = /\x1b\]1337;File=/.test(forParse);
-      onProgress({ ...pendingBlock, ms: Date.now() - t0, out: (stripped || hasImg) ? parse(forParse) : [], pending: true });
-    }, 80);
+    if (progressQueued || done) return;
+    progressQueued = true;
+    const wait = progressHoldUntil - performance.now();
+    if (wait > 0) progressTimer = setTimeout(queueProgressFrame, wait);
+    else queueProgressFrame();
+  };
+  const appendOutput = (text: string) => {
+    normalBuf += text;
+    stream.push(text);
+    emitProgress();
   };
 
   // Resuming: start from what the daemon kept. A full-screen program gets the inline
@@ -779,8 +1126,7 @@ export async function run(
       detectedTUI = true;
       notifyTui(tabId, true);
     } else if (resume.output) {
-      normalBuf = resume.output.replace(/\x1b\[\?[0-9;]*[hlsur]/g, "");
-      emitProgress();
+      appendOutput(resume.output.replace(/\x1b\[\?[0-9;]*[hlsur]/g, ""));
     }
   }
 
@@ -797,8 +1143,7 @@ export async function run(
       const cleanData = data.replace(/\x1b\[\?[0-9;]*[hlsur]/g, "");
       // Streaming interactive (ssh etc): always pipe output to block, no TUI takeover
       if (isStreamingInteractive) {
-        normalBuf += cleanData;
-        emitProgress();
+        appendOutput(cleanData);
         // ssh: once the remote shell settles (quiet period), push the warpify bootstrap.
         if (!isWarpified(tabId)) armWarpifyInject();
         return;
@@ -812,8 +1157,7 @@ export async function run(
         return;
       }
       if (detectedTUI) return;
-      normalBuf += cleanData;
-      emitProgress();
+      appendOutput(cleanData);
     });
 
     globalExitOff = shell.onExit((tid, code) => {
@@ -821,6 +1165,7 @@ export async function run(
       exitCode = code;
       // Interactive/TUI commands: remote shell never fires onContext, so resolve on exit.
       if (isInteractive || isStreamingInteractive || detectedTUI || insideInteractiveSession) {
+        tEnd ??= Date.now();
         // Give onContext a brief window to arrive first (local shell emits it quickly after exit)
         setTimeout(() => { if (!done) cleanup(); }, 300);
       }
@@ -829,6 +1174,7 @@ export async function run(
     globalCommandStartOff = shell.onCommandStart((tid) => {
       if (tid !== tabId) return;
       commandStarted = true;
+      if (!resume) { tStart = Date.now(); pendingBlock.ts = tStart; }
     });
 
     globalContextOff = shell.onContext((tid, ctx) => {
@@ -851,9 +1197,12 @@ export async function run(
       finalCtx = ctx;
       // Stop buffering immediately — the prompt line arrives after context and
       // would pollute normalBuf, causing parse() to produce different output than
-      // the last emitProgress call (flicker). Unsubscribe now, then cleanup after
-      // the emitProgress debounce (80ms) has settled.
+      // the last emitProgress call (flicker). Unsubscribe now, then cleanup shortly after.
       globalOutputOff?.(); globalOutputOff = null;
+      // Freeze the clock now; the 100ms below is finalisation, not command time.
+      tEnd ??= Date.now();
+      pendingBlock.settled = true;
+      onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf), pending: true });
       setTimeout(cleanup, 100);
     });
 
@@ -863,7 +1212,8 @@ export async function run(
       if (done) return;
       done = true;
       activeCleanups.delete(tabId);
-      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+      if (progressTimer) { clearTimeout(progressTimer); progressTimer = null; }
+      if (progressFrame !== null) { cancelAnimationFrame(progressFrame); progressFrame = null; }
       if (warpInjectTimer) { clearTimeout(warpInjectTimer); warpInjectTimer = null; }
       if (warpRetryTimer) { clearTimeout(warpRetryTimer); warpRetryTimer = null; }
       globalOutputOff?.(); globalOutputOff = null;
@@ -881,12 +1231,9 @@ export async function run(
       // later remote commands keep routing as blocks over the same live PTY.
       if (isStreamingInteractive && !keepSession) { inStreamingSessionMap.delete(tabId); notifyWarpify(tabId, false); }
 
-      const ms = Date.now() - t0;
+      const ms = elapsed();
       maybeNotify(input, ms);
-      const stripped = stripPromptLines(stripEcho(ANSI(normalBuf).trim(), effectiveInput));
-      const forParse = stripPromptLines(stripEcho(normalBuf, effectiveInput));
-      const hasImg = /\x1b\]1337;File=/.test(forParse);
-      const out = (stripped || hasImg) ? parse(forParse) : [];
+      const out = parseOutput(normalBuf, effectiveInput);
 
       const gb = finalCtx?.gitBranch ?? state.gitBranch;
       const nextState: State = {

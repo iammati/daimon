@@ -393,6 +393,13 @@ html.native-transparent [data-pane]:has(> .pager-overlay) > :not(.pager-overlay)
 html.native-transparent body:has(> .pager-overlay) > #root {
   visibility: hidden;
 }
+/* `visibility` is inherited and transitionable: anything beneath with `transition: all`
+   (every block wrapper) would stay painted for the length of its transition and show
+   through the clear pager. Hide without animating. */
+html.native-transparent [data-pane]:has(> .pager-overlay) > :not(.pager-overlay) *,
+html.native-transparent body:has(> .pager-overlay) > #root * {
+  transition: none !important;
+}
 /* Buttons and chips that sit directly on the window background. */
 html.native-transparent .veil-surface {
   background-color: color-mix(in oklab, var(--foreground) 6%, transparent);
