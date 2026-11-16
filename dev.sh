@@ -61,7 +61,7 @@ win_stop() {
   [ -n "$WIN_STAGE" ] || return 0
   local root; root=$(wslpath -w "$WIN_STAGE")
   (cd /mnt/c && powershell.exe -NoProfile -Command \
-    "Get-Process cottontail,launcher -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like '$root\\*' } | Stop-Process -Force" \
+    "Get-Process bun,cottontail,launcher -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like '$root\\*' } | Stop-Process -Force" \
     </dev/null >/dev/null 2>&1) || true
 }
 # Copy app sources to the Windows side, install deps there and build.

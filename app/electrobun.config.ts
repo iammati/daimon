@@ -24,6 +24,13 @@ export default {
     version: "0.1.0",
   },
   build: {
+    // Windows: run the main process on Bun. Electrobun's default runtime (Cottontail)
+    // keeps one thread spinning there — ~40% of a core and ~550 MB while idle, even
+    // for an empty one-window app; on Bun it idles at 0% and ~65 MB.
+    ...(process.platform === "win32" && {
+      mainProcess: "bun" as const,
+      bun: { entrypoint: "src/bun/index.ts" },
+    }),
     views: {},
     copy,
     mac:   { bundleCEF: false },

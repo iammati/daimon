@@ -137,7 +137,7 @@ EOF
 # A running copy would lock the files we're about to replace.
 win_stop() {
   (cd /mnt/c && powershell.exe -NoProfile -Command \
-    "Get-Process cottontail,launcher -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like '$(wslpath -w "$1")\\*' } | Stop-Process -Force" \
+    "Get-Process bun,cottontail,launcher -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like '$(wslpath -w "$1")\\*' } | Stop-Process -Force" \
     </dev/null >/dev/null 2>&1) || true
 }
 
