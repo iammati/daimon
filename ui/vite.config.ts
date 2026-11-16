@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import { wraith } from "wraithterm/vite";
 import type { Plugin } from "vite";
 
 // Dev only: hands the pty-daemon's token to the page when it's opened in a plain
@@ -28,7 +29,8 @@ export default defineConfig({
     __HOME__: JSON.stringify(process.env.HOME ?? "/Users/" + (process.env.USER ?? "")),
     __USER__: JSON.stringify(process.env.USER ?? ""),
   },
-  plugins: [react(), tailwindcss(), daimonToken()],
+  // wraith(): keeps wraithterm's worker / wasm / font URLs intact through dep prebundling.
+  plugins: [react(), tailwindcss(), wraith(), daimonToken()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

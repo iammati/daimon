@@ -59,16 +59,16 @@ export type Block = {
 
 export type State = { cwd: string[]; ctx: { name: string }; gitBranch?: string };
 
-// Alt-screen sequences detected by XTermPanel directly.
+// Alt-screen enter sequence.
 const FULLSCREEN_MODE = /\x1b\[\?1049h/;
 
-// Commands that stream interactively in daimon's own block view (no xterm panel).
+// Commands that stream interactively in daimon's own block view (no terminal takeover).
 // Input is forwarded via the composer; output streams into the block as plain lines.
 // ssh/sftp/mosh: connect + auth (password, host-key, 2FA) via forwarded stdin, banner
 // streams as block output, then the warpify bootstrap flips the session to block mode.
 export const STREAMING_INTERACTIVE_RE = /^\s*(ssh\b|sftp\b|mosh\b|nc\s+|ncat\s+|telnet\s+)/;
 
-// Commands that need xterm panel takeover (alt-screen TUI).
+// Commands that need the inline terminal (alt-screen TUI).
 // Only list commands where we MUST route before any output (interactive shells, exec/attach).
 // All other TUI apps (vim, k9s, claude, htop, etc.) are auto-detected via TUI_RE on first output.
 const INTERACTIVE_RE = /^\s*(scp|ipmitool|ipmi|kubectl\s+(exec|attach|debug)|oc\s+(exec|attach)|docker\s+(exec|run\s+-it?)|podman\s+(exec|run\s+-it?)|sudo\s+(-[siSI]\s+)?(-u\s+\S+\s+)?(-[siSI]\s+)?(su|bash|zsh|sh|fish)\b|su\s+|bash\s+-i|zsh\s+-i|python\s+-c|python3\s+-c)/;
@@ -89,7 +89,7 @@ shell.onAltScreen((tabId, enter) => {
   inAltScreenMap.set(tabId, enter);
   altScreenListenerMap.get(tabId)?.forEach((fn) => fn(enter));
   if (enter) {
-    // Also fire TUI notification so BlockView mounts xterm
+    // Also fire TUI notification so BlockView mounts the terminal
     tuiListenerMap.get(tabId)?.forEach((fn) => fn(true));
   }
 });
@@ -915,7 +915,7 @@ function notifyTui(tabId: string, active: boolean) {
   tuiListenerMap.get(tabId)?.forEach((fn) => fn(active));
 }
 
-// Per-tab PTY replay buffer — accumulates bytes from command start so late inline-xterm
+// Per-tab PTY replay buffer — accumulates bytes from command start so late inline-terminal
 // subscribers can replay what they missed before their subscription was created.
 const replayBufMap = new Map<string, string[]>();
 
@@ -1048,7 +1048,7 @@ export async function run(
   // If a streaming-interactive session (ssh/mosh) is active, commands sent here go to the
   // remote shell which never emits onContext — resolve on PTY exit instead.
   const insideInteractiveSession = isStreamingSession(tabId) || isAltScreen(tabId);
-  // Start buffering all PTY bytes from this command so inline xterm can replay on mount
+  // Start buffering all PTY bytes from this command so the inline terminal can replay on mount
   startReplay(tabId);
   if (isInteractive) notifyAltScreen(tabId, true);
   if (isStreamingInteractive) inStreamingSessionMap.set(tabId, true);

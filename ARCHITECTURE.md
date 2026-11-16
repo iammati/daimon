@@ -6,7 +6,7 @@ Three processes, one WebSocket.
 ┌──────────────────────────┐        ┌──────────────────────────┐
 │ Electrobun app (Bun)     │ opens  │ UI (React, in a webview) │
 │ app/src/bun              │───────▶│ ui/src                   │
-│ window, menu, native FFI │        │ blocks, composer, xterm  │
+│ window, menu, native FFI │        │ blocks, composer, wraith │
 └────────────┬─────────────┘        └────────────┬─────────────┘
              │ finds or starts                   │ WebSocket, JSON
              ▼                                   ▼ ws://localhost:7878/?token=…
@@ -30,7 +30,7 @@ Three processes, one WebSocket.
 | win-backdrop | `crates/win-backdrop` | Rust, `windows` crate | Windows-only DLL: variable-radius desktop blur |
 | shell integration | `shell-integration/` | zsh | hooks that call the CLI; `warpify.zsh` for SSH |
 | app shell | `app/` | Electrobun, Bun, `bun:ffi` | window, app menu, daemon lifecycle, native window tweaks |
-| UI | `ui/` | React 19, Vite, Tailwind 4, TanStack Router, Radix/shadcn, xterm.js | everything you see |
+| UI | `ui/` | React 19, Vite, Tailwind 4, TanStack Router, Radix/shadcn, wraithterm | everything you see |
 
 ## pty-daemon
 
@@ -85,7 +85,7 @@ How daimon knows where a command starts and ends:
 - `lib/daimon/rpc.ts` — WebSocket client, reconnects automatically.
 - `lib/daimon/shell.ts` — runs a command and parses its output into typed parts: plain/ANSI lines, image, `ls -la`, table, git status/log/branches/diff, logfmt, JSON/YAML.
 - `components/daimon/BlockView.tsx` — renders those parts. Long outputs are virtualized.
-- TUI programs (alt-screen or cursor-addressing output) switch the block to an xterm.js terminal: WebGL renderer with DOM fallback, image addon, kitty keyboard protocol (`lib/daimon/kittyKeyboard.ts`).
+- TUI programs (alt-screen or cursor-addressing output) switch the block to a Wraith terminal (`wraithterm`): Ghostty's `libghostty-vt` engine and a WebGPU renderer running in a worker, with the kitty keyboard and graphics protocols built in. WebGPU is required; there is no other renderer.
 
 The UI gets the daemon token and port from the page URL (set by the app). In a plain browser on the Vite dev server it fetches them from `/__daimon`.
 

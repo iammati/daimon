@@ -13,7 +13,7 @@ A fast, minimal terminal with a smart shell that understands what you're doing �
 - **Cross-session history** — commands and blocks persist to SQLite (full-text search), `~/.zsh_history` is imported once
 - **Command palette** — `⌘P` to jump to any dir, command, block or session
 - **Rich output** — `git status/log/branch/diff`, `ls -la`, tables, JSON/YAML, logfmt rendered as structured blocks, not raw text
-- **TUI apps inline** — vim, htop, k9s etc. run in an xterm.js view inside the block (WebGL, kitty keyboard protocol, inline images)
+- **TUI apps inline** — vim, htop, k9s etc. run in a [Wraith](https://wraithterm.com) terminal inside the block (Ghostty's VT engine, WebGPU renderer, kitty keyboard protocol and graphics)
 - **SSH** — remote zsh sessions get the same command blocks, nothing to install on the remote
 - **Completions** — `Tab` for subcommands, flags, paths, git branches/tags/remotes; YAML specs, add your own in `~/.config/daimon/specs/`
 - **Context** — git branch/dirty/ahead/behind, k8s context + namespace, OpenStack region/project in the prompt bar
@@ -28,7 +28,7 @@ A fast, minimal terminal with a smart shell that understands what you're doing �
 ## Techstack
 
 - **Rust** — PTY daemon, WebSocket server, SQLite store, completion engine, shell-hook CLI
-- **React + Vite + Tailwind** — UI, xterm.js for TUI apps
+- **React + Vite + Tailwind** — UI, wraithterm (libghostty-vt + WebGPU) for TUI apps
 - **Electrobun** — app shell (Bun main process + system webview: WKWebView / WebKitGTK / WebView2)
 - **zsh** — shell integration via OSC 133 markers
 

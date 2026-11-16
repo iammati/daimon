@@ -70,7 +70,7 @@
   --paper:           oklch(0.974 0.002 264);
   --line:            oklch(0.913 0.006 264);
   --signal:          oklch(0.585 0.192 269);   /* indigo */
-  --selection:       color-mix(in oklch, var(--signal) 24%, transparent);  /* text selection (CSS + xterm) */
+  --selection:       color-mix(in oklch, var(--signal) 24%, transparent);  /* text selection (CSS) */
   --signal-soft:     oklch(0.940 0.038 269);
   --alarm:           oklch(0.62 0.205 25);
   --amber:           oklch(0.77 0.155 70);
@@ -116,7 +116,7 @@
   --paper:           oklch(0.130 0.012 270);
   --line:            oklch(1 0 0 / 0.08);
   --signal:          oklch(0.638 0.185 269);
-  --selection:       color-mix(in oklch, var(--signal) 40%, transparent);  /* text selection (CSS + xterm) */
+  --selection:       color-mix(in oklch, var(--signal) 40%, transparent);  /* text selection (CSS) */
   --signal-soft:     oklch(0.175 0.035 269);
   --alarm:           oklch(0.67 0.2 25);
   --amber:           oklch(0.79 0.15 70);
@@ -162,7 +162,7 @@
   --paper:              oklch(0.215 0.024 275);
   --line:               oklch(0.330 0.030 275);
   --signal:             oklch(0.762 0.207 300);
-  --selection:       color-mix(in oklch, var(--signal) 36%, transparent);  /* text selection (CSS + xterm) */
+  --selection:       color-mix(in oklch, var(--signal) 36%, transparent);  /* text selection (CSS) */
   --signal-soft:        oklch(0.215 0.045 300);
   --alarm:              oklch(0.640 0.220 25);
   --amber:              oklch(0.790 0.150 65);
@@ -284,27 +284,13 @@
   animation: caret 1.1s steps(1) infinite;
 }
 
-/* Fullscreen TUI (alt-screen xterm inside a block): `absolute inset-0` must resolve
+/* Fullscreen TUI (alt-screen terminal inside a block): `absolute inset-0` must resolve
    against the pane, not the block it lives in. Un-position every wrapper between the
    pane and the terminal so [data-pane] is its containing block — no JS geometry, so it
    tracks the sidebar, splits and window resizes for free. (position: fixed is no good
    here: the glass <main> has backdrop-filter and captures fixed descendants.) */
 [data-pane] *:has(.tui-fullscreen) {
   position: static !important;
-}
-
-/* xterm transparency: override built-in opaque canvas background */
-.xterm-transparent .xterm,
-.xterm-transparent .xterm-screen,
-.xterm-transparent .xterm-screen canvas {
-  background: transparent !important;
-}
-.xterm-transparent .xterm-viewport {
-  background: transparent !important;
-}
-/* (With themed scrollbars this would switch the ::-webkit-scrollbar styling off.) */
-html:not(.themed-scrollbars) .xterm-transparent .xterm-viewport {
-  scrollbar-color: oklch(0.5 0 0 / 0.25) transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

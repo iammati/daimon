@@ -8,14 +8,7 @@ import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
 import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode } from "@/lib/daimon/shell";
-import { Terminal } from "@xterm/xterm";
-import { syncTerminalSelection } from "@/lib/daimon/themeColors";
-import { FitAddon } from "@xterm/addon-fit";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
-import { ImageAddon } from "@xterm/addon-image";
-import { attachGpuRenderer } from "@/lib/daimon/gpu";
-import { attachKittyKeyboard } from "@/lib/daimon/kittyKeyboard";
-import "@xterm/xterm/css/xterm.css";
+import { Wraith } from "wraithterm";
 import hljs from "highlight.js/lib/core";
 import hljsBash from "highlight.js/lib/languages/bash";
 import hljsJson from "highlight.js/lib/languages/json";
@@ -2550,7 +2543,10 @@ function StdinRow({ sessionId }: { sessionId: string }) {
 /** Collapsed output clamp; output taller than this is "long" and becomes collapsible. */
 const COLLAPSED_MAX_PX = 320;
 
-export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; tuiHandle?: import("@/components/daimon/XTermPanel").XTermHandle | undefined; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
+/** Terminal background. The WebGPU surface is opaque, so this is a solid color. */
+const TUI_BG = "#0d1117";
+
+export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const ok = block.code === 0;
   const failed = !block.pending && !ok;
   const [expanded, setExpandedRaw] = useState(true);
@@ -2582,12 +2578,12 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     return () => window.removeEventListener("keydown", onKey);
   }, [isLast, setExpanded]);
 
-  // Inline TUI: create xterm directly in this block's div
+  // Inline TUI: the terminal is mounted directly in this block's div
   const inlineTuiRef = useRef<HTMLDivElement>(null);
   // Seed from map in case altScreenEnter already fired before this component mounted
   const [tuiFullscreen, setTuiFullscreen] = useState(() => getAltScreen(sessionId));
   const tuiFitRef = useRef<(() => void) | null>(null);
-  // Subscribe to alt-screen events at component level — independent of xterm mount timing
+  // Subscribe to alt-screen events at component level — independent of terminal mount timing
   useEffect(() => {
     if (!sessionId) return;
     // Re-check in case event arrived between useState init and effect setup
@@ -2622,97 +2618,64 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
   useEffect(() => {
     if (!isTuiActive || !inlineTuiRef.current) return;
     const el = inlineTuiRef.current;
-    const term = new Terminal({
-      fontFamily: '"MesloLGS Nerd Font Mono", "MesloLGS NF", "MesloLGM Nerd Font", Monaco, Menlo, monospace, "Apple Color Emoji", "Segoe UI Emoji"',
+    // Wraith: libghostty-vt + a WebGPU renderer in a worker. It fits itself to the
+    // host (its own ResizeObserver), speaks the kitty keyboard and graphics protocols,
+    // and keeps scrollback inside its viewport. There is no other renderer: if WebGPU
+    // is missing the block shows the error.
+    let disposed = false;
+    let term: Wraith | null = null;
+    // Bytes that arrive while the engine is still mounting: the replay buffer first,
+    // then whatever the PTY sends in the meantime, in order.
+    const pending: string[] = [...getTuiReplayBuffer(sessionId)];
+    const feed = (data: string) => {
+      if (term) void term.write(data).catch((err) => console.error("[tui] write failed:", err));
+      else pending.push(data);
+    };
+    const off = shell.onOutput((tabId, data) => {
+      if (tabId === sessionId) feed(data);
+    });
+    const subs: { dispose(): void }[] = [];
+
+    Wraith.mount(el, {
       fontSize: 13,
       lineHeight: 1.2,
-      cursorBlink: true,
-      allowTransparency: true,
-      theme: {
-        background: "transparent",
-        foreground: "#e6edf3",
-        black: "#484f58", red: "#ff7b72", green: "#3fb950", yellow: "#d29922",
-        blue: "#58a6ff", magenta: "#bc8cff", cyan: "#39c5cf", white: "#b1bac4",
-        brightBlack: "#6e7681", brightRed: "#ffa198", brightGreen: "#56d364",
-        brightYellow: "#e3b341", brightBlue: "#79c0ff", brightMagenta: "#d2a8ff",
-        brightCyan: "#56d4dd", brightWhite: "#f0f6fc",
-        cursor: "#58a6ff",
-      },
-      allowProposedApi: true,
       scrollback: 10000,
+      commandBlocks: false, // daimon draws its own blocks
+      theme: {
+        foreground: "#e6edf3",
+        background: TUI_BG,
+        cursor: "#58a6ff",
+        palette: [
+          "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
+          "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#f0f6fc",
+        ],
+      },
+    }).then((t) => {
+      if (disposed) { void t.dispose(); return; }
+      term = t;
+      subs.push(
+        t.onData((data) => sendRaw(sessionId, data)),
+        t.onResize(({ cols, rows }) => resizePty(sessionId, cols, rows)),
+        t.onError((err) => console.error("[tui]", err)),
+      );
+      tuiFitRef.current = () => { t.fit(); resizePty(sessionId, t.cols, t.rows); };
+      resizePty(sessionId, t.cols, t.rows);
+      for (const chunk of pending.splice(0)) feed(chunk);
+      t.focus();
+      // Resumed full-screen program (the UI restarted while it ran): now that this
+      // terminal listens, have it repaint.
+      if (takeRedraw(sessionId)) shell.redraw(sessionId);
+    }).catch((err: unknown) => {
+      console.error("[tui] terminal failed to start:", err);
+      if (!disposed) el.textContent = `Terminal failed to start: ${err instanceof Error ? err.message : String(err)}`;
     });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    const unicode11 = new Unicode11Addon();
-    term.loadAddon(unicode11);
-    term.unicode.activeVersion = '11';
-    term.loadAddon(new ImageAddon());
-    term.open(el);
-    attachGpuRenderer(term);
-    const kittyKeys = attachKittyKeyboard(term, (data) => sendRaw(sessionId, data));
-    const stopSelectionSync = syncTerminalSelection(term);
-    tuiFitRef.current = () => { updateHeight(); resizePty(sessionId, term.cols, term.rows); };
-
-    // Cell dimensions — measure once after open
-    const CELL_H = 13 * 1.2; // fontSize * lineHeight
-    const replay = getTuiReplayBuffer(sessionId);
-    let altScreen = getAltScreen(sessionId);
-    const updateHeight = () => {
-      el.style.left = '';
-      el.style.top = '';
-      el.style.width = '';
-      el.style.height = '';
-      fit.fit();
-      // The class (React state) and `altScreen` (this closure) flip a frame apart;
-      // never pin an inline height while the fullscreen class is on, or it would
-      // override `inset: 0`.
-      if (!altScreen && !el.classList.contains('tui-fullscreen')) {
-        const lines = term.buffer.active.length;
-        el.style.height = Math.ceil(Math.max(lines, term.rows) * CELL_H) + "px";
-      }
-    };
-    updateHeight();
-    resizePty(sessionId, term.cols, term.rows);
-    term.focus();
-    term.onData((data) => sendRaw(sessionId, data));
-    term.onResize(({ cols, rows }) => resizePty(sessionId, cols, rows));
-    // ResizeObserver fires on every pixel change of the pane (window resize + sidebar animation).
-    // Fire fit() directly each frame — DOM renderer has no glyph atlas to corrupt.
-    let resizeRaf: number | null = null;
-    const paneEl = (el.closest('[data-pane]') as HTMLElement) ?? el.closest('main') ?? el;
-    const ro = new ResizeObserver(() => {
-      if (resizeRaf) cancelAnimationFrame(resizeRaf);
-      resizeRaf = requestAnimationFrame(() => {
-        updateHeight();
-      });
-    });
-    ro.observe(paneEl);
-    // Replay buffered bytes that arrived before this subscription was created
-    for (const chunk of replay) term.write(new TextEncoder().encode(chunk));
-    updateHeight();
-    // Track alt-screen for updateHeight (setTuiFullscreen handled at component level)
-    const offAlt = shell.onAltScreen((tabId, enter) => {
-      if (tabId !== sessionId) return;
-      altScreen = enter;
-      updateHeight();
-    });
-    // Subscribe to PTY output
-    const off = shell.onOutput((tabId, data) => {
-      if (tabId !== sessionId) return;
-      term.write(new TextEncoder().encode(data), () => updateHeight());
-    });
-    // Resumed full-screen program (the UI restarted while it ran): now that this
-    // terminal listens, have it repaint.
-    if (takeRedraw(sessionId)) shell.redraw(sessionId);
     return () => {
-      kittyKeys.dispose();
+      disposed = true;
       off();
-      offAlt();
-      ro.disconnect();
-      if (resizeRaf) cancelAnimationFrame(resizeRaf);
+      subs.forEach((d) => d.dispose());
       tuiFitRef.current = null;
-      stopSelectionSync();
-      term.dispose();
+      void term?.dispose();
+      term = null;
     };
   // Only create once when isTuiActive first becomes true
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2800,14 +2763,15 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
           )}
         </span>
       </header>
-      {/* Inline TUI: xterm mounted directly here for alt-screen apps (vim, htop, fzf). */}
+      {/* Inline TUI: terminal mounted directly here for alt-screen apps (vim, htop, fzf).
+          Inline it is a fixed-height viewport with its own scrollback. */}
       {isTuiActive && (
         <div
           ref={inlineTuiRef}
           className={tuiFullscreen
-            ? "xterm-transparent tui-fullscreen absolute inset-0 z-50 bg-black"
-            : "xterm-transparent mt-2.5 rounded"}
-          style={{ minHeight: 0, willChange: "transform" }}
+            ? "tui-fullscreen absolute inset-0 z-50"
+            : "mt-2.5 h-[min(24rem,60vh)] overflow-hidden rounded"}
+          style={{ minHeight: 0, background: TUI_BG }}
         />
       )}
       {!isTuiActive && block.out.length > 0 && (

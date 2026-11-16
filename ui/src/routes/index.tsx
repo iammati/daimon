@@ -6,7 +6,6 @@ import { BlockView, PresentationModeContext } from "@/components/daimon/BlockVie
 import { Composer } from "@/components/daimon/Composer";
 import { HistoryPanel } from "@/components/daimon/HistoryPanel";
 import { ContextSwitcher } from "@/components/daimon/ContextSwitcher";
-import { XTermPanel, type XTermHandle } from "@/components/daimon/XTermPanel";
 import { run, sendRaw, resizePty, notifyAltScreen, onAltScreenChange, onTuiChange, STREAMING_INTERACTIVE_RE, isStreamingSession, isWarpified, abandonRun, setNotifConfig, type Block, type State } from "@/lib/daimon/shell";
 import { shell, type AttachInfo } from "@/lib/daimon/rpc";
 import { displayPath } from "@/lib/daimon/world";
@@ -159,8 +158,6 @@ function Daimon() {
   const splitSessionId = active.splitId ?? null;
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const renameRef = useRef<HTMLInputElement>(null);
-  // Per-session xterm handles (kept for potential future use) and TUI block tracking
-  const xtermHandlesRef = useRef<Map<string, XTermHandle>>(new Map());
   // sessionId -> blockId for currently-active inline TUI blocks
   const [tuiBlockIds, setTuiBlockIds] = useState<Map<string, string>>(new Map());
   const [altScreenActive, setAltScreenActive] = useState(false);
@@ -411,10 +408,10 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.blocks]);
 
-  // PTY output is now consumed directly by BlockView's inline xterm subscription
+  // PTY output is now consumed directly by BlockView's inline terminal subscription
 
   // Both alt-screen (vim/nano/ssh) and TUI-detected (hammer/fzf) render inline in the block.
-  // No overlay — BlockView creates its own xterm when isTuiActive=true.
+  // No overlay — BlockView creates its own terminal when isTuiActive=true.
   const setInlineActive = (sessionId: string, active: boolean) => {
     setSessions((prev) => {
       const sessionBlocks = prev.find((s) => s.id === sessionId)?.blocks ?? [];
@@ -489,7 +486,6 @@ function Daimon() {
   };
 
   const closeTab = (id: string) => {
-    xtermHandlesRef.current.delete(id);
     setSessions((prev) => {
       if (prev.length <= 1) return prev;
       const idx = prev.findIndex((s) => s.id === id);
@@ -1398,7 +1394,6 @@ function Daimon() {
         )}
       </main>
 
-      {/* per-session XTermPanels removed — all TUI now renders inline in BlockView */}
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
