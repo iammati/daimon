@@ -81,6 +81,11 @@ const INTERACTIVE_RE = /^\s*(scp|ipmitool|ipmi|kubectl\s+(exec|attach|debug)|oc\
 // which normalizeTerminal replays in the block.
 const TUI_RE = /\x1b\[\d*A|\x1b\[\d*;\d*H|\x1b\[H\b|\x1b\[2J|\x1b\[3J|\x1b\[\?1000h|\x1b\[\?1049[lh]/;
 
+// Terminal state changes that mean nothing in a text block: private mode set/reset,
+// cursor save/restore (ESC 7 / ESC 8) and scroll-region set/reset (CSI r). Full-screen
+// programs (claude, vim) send these before their first frame, i.e. before TUI detection.
+const PTY_STATE_RE = /\x1b\[\?[0-9;]*[hlsur]|\x1b[78]|\x1b\[[0-9;]*r/g;
+
 // Per-tab alt-screen state — driven by daemon altScreenEnter/Exit events.
 const inAltScreenMap = new Map<string, boolean>();
 function isAltScreen(tabId: string) { return inAltScreenMap.get(tabId) ?? false; }
@@ -301,6 +306,19 @@ function ansiToHtml(raw: string): string {
   return out + ansiHtmlClose(st);
 }
 
+/** Whether `s` prints something with a background colour — visible output even if it is only spaces (a colour bar). */
+function paintsBg(s: string): boolean {
+  if (!s.includes("\x1b[")) return false;
+  let sgr = SGR_NONE;
+  let last = 0;
+  for (const m of s.matchAll(SGR_RE)) {
+    if (sgr.bg && ANSI(s.slice(last, m.index)) !== "") return true;
+    sgr = sgrApply(sgr, m[1]!);
+    last = (m.index ?? 0) + m[0].length;
+  }
+  return !!sgr.bg && ANSI(s.slice(last)) !== "";
+}
+
 // Returns true if the string contains ANSI color/style escape sequences or OSC 8
 // hyperlinks — anything that needs the html renderer.
 const hasColor = (s: string) => /\x1b\[[0-9;]*m|\x1b\]8;/.test(s);
@@ -308,10 +326,17 @@ const hasColor = (s: string) => /\x1b\[[0-9;]*m|\x1b\]8;/.test(s);
 const now = () =>
   new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
+/**
+ * Whitespace removed, for comparing a line with the command it may echo. When the echo is wider
+ * than the terminal, zsh adds " \r\x1b[K \r" at each wrap point; with the controls stripped that
+ * leaves stray spaces in the line, wherever the wrap fell.
+ */
+const echoKey = (s: string) => s.replace(/\s+/g, "");
+
 // Strip PTY command echo: compare stripped version, keep raw line
 function stripEcho(text: string, input: string): string {
-  const cmd = input.trim();
-  return text.split("\n").filter((l) => ANSI(l).trim() !== cmd).join("\n").trim();
+  const cmd = echoKey(input);
+  return text.split("\n").filter((l) => echoKey(ANSI(l)) !== cmd).join("\n").trim();
 }
 
 // Strip shell prompt lines — compare stripped version, keep raw line
@@ -566,7 +591,7 @@ function parse(rawText: string): Out[] {
   const cleaned = normalizeTerminal(rawText);
   if (hasColor(cleaned)) {
     const stripped = ANSI(cleaned).trim();
-    if (!stripped) return [];
+    if (!stripped && !paintsBg(cleaned)) return [];
     // git diff produces colored output — detect on stripped text before falling back to ansi
     if (looksLikeDiff(stripped.split("\n").slice(0, 6).join("\n"))) {
       return [{ kind: "gitdiff", raw: stripped }];
@@ -641,7 +666,7 @@ function parseOutput(raw: string, input: string): Out[] {
   const stripped = stripPromptLines(stripEcho(ANSI(raw).trim(), input));
   const forParse = stripPromptLines(stripEcho(raw, input));
   const hasImg = /\x1b\]1337;File=/.test(forParse);
-  return (stripped || hasImg) ? parse(forParse) : [];
+  return (stripped || hasImg || paintsBg(forParse)) ? parse(forParse) : [];
 }
 
 // ── Streaming parse ────────────────────────────────────────────────────────
@@ -725,7 +750,7 @@ class OutputStream {
   private yaml = newYamlScan();
 
   constructor(private readonly input: string) {
-    this.cmd = input.trim();
+    this.cmd = echoKey(input);
   }
 
   push(data: string): void {
@@ -751,8 +776,8 @@ class OutputStream {
     const tail = this.tail;
     if (tail.includes("\x1b]1337;File=") || backspaceUnderflows(tail)) return parseOutput(raw, this.input);
     const tailText = ANSI(tail).trim();
-    const tailKept = tailText !== this.cmd && !PROMPT_RE.test(tailText);
-    if (!this.visible && !(tailKept && tailText)) return [];
+    const tailKept = echoKey(tailText) !== this.cmd && !PROMPT_RE.test(tailText);
+    if (!this.visible && !(tailKept && (tailText || paintsBg(tail)))) return [];
 
     // The unfinished end: held lines plus the partial last line, trimmed as the end of the text.
     const carry: SgrCarry = { sgr: this.carry.sgr };
@@ -768,8 +793,8 @@ class OutputStream {
   private addRaw(l: string): void {
     if (l.includes("\x1b]1337;File=") || hasOpenOsc(l) || backspaceUnderflows(l)) { this.complex = true; return; }
     const text = ANSI(l).trim();
-    if (text === this.cmd || PROMPT_RE.test(text)) return;   // command echo / prompt line
-    if (text) this.visible = true;
+    if (echoKey(text) === this.cmd || PROMPT_RE.test(text)) return;   // command echo / prompt line
+    if (text || paintsBg(l)) this.visible = true;
     if (isBlank(l)) { if (this.started) this.held.push(l); return; }
     for (const h of this.held) this.addDone(renderLine(h, this.carry));
     this.held = [this.started ? l : l.trimStart()];
@@ -800,8 +825,8 @@ class OutputStream {
     }
     if (this.diff !== false) {
       const text = (this.aText + open.map(ANSI).join("\n")).trim();
-      if (!text) return [];
-      const isDiff = this.diff ?? looksLikeDiff(text.split("\n", 6).join("\n"));
+      // No text but visible: background-coloured spaces, not a diff.
+      const isDiff = !!text && (this.diff ?? looksLikeDiff(text.split("\n", 6).join("\n")));
       // Settled once the lines it is judged on can no longer be the (trimmed) end of the text.
       if (this.aFirst >= 0 && this.aLast >= this.aFirst + 6) {
         this.diff = isDiff;
@@ -1172,7 +1197,7 @@ export async function run(
       detectedTUI = true;
       notifyTui(tabId, true);
     } else if (resume.output) {
-      appendOutput(resume.output.replace(/\x1b\[\?[0-9;]*[hlsur]/g, ""));
+      appendOutput(resume.output.replace(PTY_STATE_RE, ""));
     }
   }
 
@@ -1186,7 +1211,7 @@ export async function run(
       // Buffer every byte for replay
       appendReplay(tabId, data);
       // Strip PTY mode-set sequences before buffering
-      const cleanData = data.replace(/\x1b\[\?[0-9;]*[hlsur]/g, "");
+      const cleanData = data.replace(PTY_STATE_RE, "");
       // Streaming interactive (ssh etc): always pipe output to block, no TUI takeover
       if (isStreamingInteractive) {
         appendOutput(cleanData);

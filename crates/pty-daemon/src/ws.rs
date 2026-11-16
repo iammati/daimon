@@ -190,6 +190,13 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
                                 let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
                             });
                         }
+                        Ok(SessionCommand::FileContent { req_id, blob, file_path, cwd }) => {
+                            let tx = client_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = crate::commands::git_file_content(&blob, &file_path, &cwd);
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
+                            });
+                        }
                         // ── Store commands ────────────────────────────────────────────
                         Ok(SessionCommand::HistoryAdd { req_id, cmd, ts }) => {
                             let tx = client_tx.clone();

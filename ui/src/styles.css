@@ -275,6 +275,59 @@
   animation: rise 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
+/* ── Modals and popovers: in/out ─────────────────────────────────────────────
+   Mounted with usePresence (lib/daimon/presence.ts): the enter animation plays on mount, the
+   exit one while `data-state="closed"` (at most EXIT_MS long) before it unmounts.
+   Smoothness over flourish: the panels carry a live backdrop blur, and scaling one makes the
+   webview re-blur every frame (dropped frames on WebKitGTK/WebView2). So only opacity and a
+   small lift are animated, on their own compositor layer, with curves that ease on both ends. */
+.modal-backdrop { animation: modal-fade-in 200ms cubic-bezier(0.33, 1, 0.68, 1) both; }
+.modal-panel { animation: modal-rise-in 240ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.popover-panel { animation: popover-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both; will-change: transform, opacity; }
+.modal-backdrop[data-state="closed"] { animation: modal-fade-out 150ms cubic-bezier(0.4, 0, 0.2, 1) both; pointer-events: none; }
+.modal-panel[data-state="closed"] { animation: modal-rise-out 150ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+.popover-panel[data-state="closed"] { animation: popover-out 130ms cubic-bezier(0.4, 0, 0.2, 1) both; pointer-events: none; }
+
+@keyframes modal-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-fade-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes modal-rise-in {
+  from { opacity: 0; transform: translate3d(0, 8px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes modal-rise-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(0, 4px, 0); }
+}
+@keyframes popover-in {
+  from { opacity: 0; transform: translate3d(0, -4px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes popover-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to { opacity: 0; transform: translate3d(0, -3px, 0); }
+}
+
+/* Ctrl/Cmd+Shift block mode: the dashed ring around the hovered block. Drawn 16px out at the
+   sides, so it goes around a block's own red failed/focus background (which bleeds 12px out,
+   -mx-3) rather than through it. Fades in/out. */
+.block-ring::after {
+  content: "";
+  position: absolute;
+  inset: -4px -16px;
+  border: 2px dashed color-mix(in oklab, var(--signal) 50%, transparent);
+  border-radius: 0.75rem;
+  background: color-mix(in oklab, var(--signal) 3%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.block-ring[data-ring="on"]::after { opacity: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-panel, .popover-panel { animation-name: modal-fade-in; }
+  .modal-panel[data-state="closed"], .popover-panel[data-state="closed"] { animation-name: modal-fade-out; }
+}
+
 @keyframes caret {
   0%, 55% { opacity: 1; }
   56%, 100% { opacity: 0; }

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { Keys } from "./Kbd";
 import { shell } from "@/lib/daimon/rpc";
+import { usePresence } from "@/lib/daimon/presence";
 
 type Command = { id: string; label: string; description?: string; run: () => void };
 
@@ -78,6 +79,7 @@ function formatCwd(cwd: string): string {
 }
 
 export function CommandPalette({ open, onClose, onRun, onCd, history, sessions, onSwitchSession, commands = [] }: Props) {
+  const shown = usePresence(open);   // stays mounted while it animates out
   const [query, setQuery] = useState("");
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const [cursor, setCursor] = useState(0);
@@ -118,7 +120,7 @@ export function CommandPalette({ open, onClose, onRun, onCd, history, sessions, 
     return () => { if (searchDebounce.current) clearTimeout(searchDebounce.current); };
   }, [query]);
 
-  if (!open) return null;
+  if (!shown) return null;
 
   const q = query.toLowerCase();
   const filteredHistory = history
@@ -185,10 +187,11 @@ export function CommandPalette({ open, onClose, onRun, onCd, history, sessions, 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-[14vh] bg-black/60 backdrop-blur-sm"
+      data-state={open ? "open" : "closed"}
+      className="modal-backdrop fixed inset-0 z-50 flex items-start justify-center pt-[14vh] bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
-      <div className="w-[700px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div data-state={open ? "open" : "closed"} className="modal-panel w-[700px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center gap-3 border-b border-border px-4 py-3">
             <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/50" />
             <input

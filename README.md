@@ -13,11 +13,13 @@ A fast, minimal terminal with a smart shell that understands what you're doing �
 - **Cross-session history** — commands and blocks persist to SQLite (full-text search), `~/.zsh_history` is imported once
 - **Command palette** — `⌘P` to jump to any dir, command, block or session
 - **Rich output** — `git status/log/branch/diff`, `ls -la`, tables, JSON/YAML, logfmt rendered as structured blocks, not raw text
-- **TUI apps inline** — vim, htop, k9s etc. run in a [Wraith](https://wraithterm.com) terminal inside the block (Ghostty's VT engine, WebGPU renderer, kitty keyboard protocol and graphics)
+- **TUI apps inline** — vim, htop, k9s etc. run in a [Wraith](https://wraithterm.com) terminal inside the block (Ghostty's VT engine + WebGPU renderer in a worker, kitty keyboard protocol); alt-screen apps take the whole pane
 - **SSH** — remote zsh sessions get the same command blocks, nothing to install on the remote
 - **Completions** — `Tab` for subcommands, flags, paths, git branches/tags/remotes; YAML specs, add your own in `~/.config/daimon/specs/`
 - **Context** — git branch/dirty/ahead/behind, k8s context + namespace, OpenStack region/project in the prompt bar
 - **Split panes** — two sessions side by side
+- **Session icons** — the sidebar shows what each session is running (git, kubectl, docker, ssh, claude, …)
+- **Sticky command header** — the command of the block you scrolled into stays in the title bar; click to jump back to its start
 - **Presentation mode** — `⌘⇧P` redacts secrets in output
 - **Links** — clickable URLs and file paths in output
 - **Notifications** — optional, for commands running longer than a threshold
@@ -28,7 +30,8 @@ A fast, minimal terminal with a smart shell that understands what you're doing �
 ## Techstack
 
 - **Rust** — PTY daemon, WebSocket server, SQLite store, completion engine, shell-hook CLI
-- **React + Vite + Tailwind** — UI, wraithterm (libghostty-vt + WebGPU) for TUI apps
+- **React + Vite + Tailwind** — UI
+- **wraithterm** — terminal for TUI apps: `libghostty-vt` + Rust WebGPU renderer in one Wasm module (replaces xterm.js; needs WebGPU in the webview)
 - **Electrobun** — app shell (Bun main process + system webview: WKWebView / WebKitGTK / WebView2)
 - **zsh** — shell integration via OSC 133 markers
 

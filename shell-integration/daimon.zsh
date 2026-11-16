@@ -4,6 +4,12 @@
 
 DAIMON_BIN="${DAIMON_BIN:-daimon}"
 
+# The app points DAIMON_BIN at its bundled CLI, which isn't on PATH — make
+# `daimon <command>` work at the prompt too.
+if [[ "$DAIMON_BIN" != daimon ]]; then
+  daimon() { "$DAIMON_BIN" "$@" }
+fi
+
 # Load user opt-in modules (written by `daimon setup`)
 [[ -f "$HOME/.config/daimon/config.zsh" ]] && source "$HOME/.config/daimon/config.zsh"
 

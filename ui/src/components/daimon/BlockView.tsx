@@ -4,6 +4,8 @@ import { createPortal } from "react-dom";
 import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon, CircleDotIcon, CloudIcon, CloudOffIcon, ArrowUpIcon, ArrowDownIcon, CheckIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Keys } from "./Kbd";
+import { MarkdownDiffView, MarkdownModeToggle } from "./MarkdownDiffView";
+import { isMarkdownPath, useMarkdownRendered, toggleMarkdownRendered } from "@/lib/daimon/markdownMode";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
@@ -21,6 +23,7 @@ import hljsGo from "highlight.js/lib/languages/go";
 import hljsHtml from "highlight.js/lib/languages/xml";
 import hljsCss from "highlight.js/lib/languages/css";
 import hljsToml from "highlight.js/lib/languages/ini";
+import { usePresence } from "@/lib/daimon/presence";
 
 
 hljs.registerLanguage("bash", hljsBash);
@@ -500,6 +503,7 @@ function DiffTable({ raw, search = "" }: { raw: string; search?: string }) {
 
 function FileDiffView({ fullHash, filePath, cwd, search = "" }: { fullHash: string; filePath: string; cwd: string; search?: string }) {
   const [diff, setDiff] = useState<string | "loading">("loading");
+  const mdRendered = useMarkdownRendered();
 
   useEffect(() => {
     shell.getFileDiff(fullHash, filePath, cwd).then(setDiff);
@@ -508,6 +512,7 @@ function FileDiffView({ fullHash, filePath, cwd, search = "" }: { fullHash: stri
   if (diff === "loading") return <p className="py-1 font-mono text-[13px] text-muted-foreground">Loading diff…</p>;
   if (!diff.trim()) return <p className="py-1 font-mono text-[13px] text-muted-foreground">No diff available.</p>;
 
+  if (mdRendered && isMarkdownPath(filePath)) return <MarkdownDiffView raw={diff} path={filePath} cwd={cwd} />;
   return <DiffTable raw={diff} search={search} />;
 }
 
@@ -551,6 +556,7 @@ function CommitDetailView({
                 <span className="w-10 shrink-0 text-right tabular-nums font-mono text-[13px] text-signal">+{f.additions}</span>
                 <span className="w-10 shrink-0 text-right tabular-nums font-mono text-[13px] text-alarm">-{f.deletions}</span>
                 <span className="flex-1 truncate font-mono text-[13px] text-foreground/80">{hl(f.path, search)}</span>
+                {isMarkdownPath(f.path) && <MarkdownModeToggle className="mr-2" />}
               </button>
               {fileOpen && (
                 <div className="pb-2 pl-4">
@@ -824,6 +830,9 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
           if (prevOpen && prevCount > 0) setFileIdx(prevCount - 1);
         }
       }
+    } else if (e.key === "m" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleMarkdownRendered();
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       if (fileIdx !== null && entry) {
@@ -968,6 +977,73 @@ function BlockDuration({ block }: { block: Block }) {
     if (!live && ref.current) ref.current.textContent = fmtDuration(block.ms);
   }, [live, block.ms]);
   return <span ref={ref}>{fmtDuration(live && ts != null ? Date.now() - ts : block.ms)}</span>;
+}
+
+/** Copy a block's command and its output (as plain text) to the clipboard. */
+function copyBlock(block: Block) {
+  const text = block.out
+    .flatMap((o) =>
+      o.kind === "lines" ? o.lines :
+      o.kind === "ansi" ? [o.html.replace(/<[^>]+>/g, "")] :
+      o.kind === "pairs" ? o.pairs.map(([k, v]) => `${k}: ${v}`) :
+      o.kind === "table" ? [o.head.join("\t"), ...o.rows.map((r) => r.join("\t"))] :
+      o.kind === "gitlog" ? o.entries.map((e) => `${e.fullHash} ${e.date} ${e.subject} ${e.author}`) :
+      o.kind === "gitbranches" ? o.branches.map((b) => b === o.current ? `* ${b}` : `  ${b}`) :
+      o.kind === "gitdiff" ? o.raw.split("\n") :
+      o.kind === "logfmt" ? o.lines.map((f) => Object.entries(f).map(([k, v]) => `${k}=${v}`).join(" ")) :
+      o.kind === "pretty" ? [o.text] :
+      []
+    )
+    .join("\n");
+  const full = `$ ${block.input}\n${text}`.trimEnd();
+  navigator.clipboard.writeText(full);
+  toast.success(`Copied: ${full.slice(0, 80)}${full.length > 80 ? "…" : ""}`);
+}
+
+/** Exit code (if failed), duration, start time and copy button — a block's header meta, also shown in the session header. */
+export function BlockMeta({ block, className = "" }: { block: Block; className?: string }) {
+  const failed = !block.pending && block.code !== 0;
+  return (
+    <span className={`flex items-center gap-3 font-mono text-[11px] tabular-nums text-muted-foreground/70 ${className}`}>
+      {failed && <span className="text-alarm/80">exit {block.code}</span>}
+      <BlockDuration block={block} />
+      <span title={block.ts ? stampTitle(block.ts) : undefined}>{block.at}</span>
+      {block.out.length > 0 && (
+        <button
+          onClick={() => copyBlock(block)}
+          title="Copy output"
+          className="transition-opacity rounded p-0.5 hover:bg-secondary"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+          </svg>
+        </button>
+      )}
+    </span>
+  );
+}
+
+/** The Ctrl/Cmd+Shift block-mode keys, in the hovered block's header row; fades in/out with the mode. */
+function BlockModeHints({ open, collapsible }: { open: boolean; collapsible: "collapse" | "expand" | null }) {
+  const shown = usePresence(open);
+  if (!shown) return null;
+  const actions: [string, string][] = [["C", "copy all"], ["I", "cmd"], ["O", "output"], ["R", "re-run"]];
+  if (collapsible) actions.push(["E", collapsible]);
+  return (
+    <span
+      data-state={open ? "open" : "closed"}
+      className="popover-panel pointer-events-none flex items-center gap-1 rounded-md border border-signal/30 bg-card/90 px-2 py-0.5 shadow-sm"
+    >
+      {actions.map(([k, label], ai) => (
+        <span key={k} className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
+          <kbd className="rounded bg-signal/15 px-1 py-0.5 font-semibold text-signal">{k}</kbd>
+          <span>{label}</span>
+          {ai < actions.length - 1 && <span className="mx-0.5 text-border">·</span>}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function PermBadge({ perms }: { perms: string }) {
@@ -1879,7 +1955,7 @@ function ExpandableTableView({ out, input, ctx }: { out: Extract<Out, { kind: "t
   );
 }
 
-function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
+function GitDiffView({ raw, isLast, cwd }: { raw: string; isLast?: boolean; cwd?: string }) {
   const files = React.useMemo(() => {
     const sections: { path: string; raw: string; additions: number; deletions: number }[] = [];
     const parts = raw.split(/^(?=diff --git )/m).filter(Boolean);
@@ -1896,6 +1972,7 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
 
   const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
   const [cursor, setCursor] = useState(0);
+  const mdRendered = useMarkdownRendered();
   const allCollapsed = openFiles.size === 0;
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
@@ -1928,6 +2005,9 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
       e.preventDefault();
       const f = files[cursor];
       if (f && openFiles.has(f.path)) setOpenFiles((prev) => { const s = new Set(prev); s.delete(f.path); return s; });
+    } else if (e.key === "m" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleMarkdownRendered();
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       const f = files[cursor];
@@ -1966,10 +2046,11 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
                 <span className="w-10 shrink-0 text-right tabular-nums text-alarm">-{f.deletions}</span>
                 <span className="flex-1 truncate text-foreground/80">{hl(f.path, search)}</span>
                 {hits > 0 && <span className="shrink-0 rounded bg-amber-400/15 px-1.5 text-[11px] text-amber-400">{hits} match{hits !== 1 ? "es" : ""}</span>}
+                {isMarkdownPath(f.path) && <MarkdownModeToggle />}
               </button>
               {openFiles.has(f.path) && (
                 <div className="px-4 pb-3">
-                  <DiffTable raw={f.raw} search={search} />
+                  {mdRendered && isMarkdownPath(f.path) ? <MarkdownDiffView raw={f.raw} path={f.path} {...(cwd ? { cwd } : {})} /> : <DiffTable raw={f.raw} search={search} />}
                 </div>
               )}
             </div>
@@ -2395,7 +2476,7 @@ function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
   );
 }
 
-function OutView({ out: rawOut, input = "", ctx = "", isLast = false, onSearch, onPathClick }: { out: Out; input?: string; ctx?: string; isLast?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
+function OutView({ out: rawOut, input = "", ctx = "", cwd, isLast = false, onSearch, onPathClick }: { out: Out; input?: string; ctx?: string; cwd?: string; isLast?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const pm = useContext(PresentationModeContext);
   // Content-based redaction at the render boundary: scrub secrets from the parsed output for
   // EVERY kind in one place when presentation mode is on. Non-destructive — the stored block is
@@ -2499,7 +2580,7 @@ function OutView({ out: rawOut, input = "", ctx = "", isLast = false, onSearch, 
     return <GitStatusView {...out} {...(onPathClick ? { onCd: onPathClick } : {})} />;
 
   if (out.kind === "gitdiff")
-    return <GitDiffView raw={out.raw} isLast={isLast} />;
+    return <GitDiffView raw={out.raw} isLast={isLast} {...(cwd ? { cwd } : {})} />;
 
   if (out.kind === "logfmt")
     return <LogfmtView lines={out.lines} />;
@@ -2546,7 +2627,7 @@ const COLLAPSED_MAX_PX = 320;
 /** Terminal background. The WebGPU surface is opaque, so this is a solid color. */
 const TUI_BG = "#0d1117";
 
-export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
+export function BlockView({ block, modeActive = false, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; modeActive?: boolean; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const ok = block.code === 0;
   const failed = !block.pending && !ok;
   const [expanded, setExpandedRaw] = useState(true);
@@ -2628,7 +2709,9 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     // then whatever the PTY sends in the meantime, in order.
     const pending: string[] = [...getTuiReplayBuffer(sessionId)];
     const feed = (data: string) => {
-      if (term) void term.write(data).catch((err) => console.error("[tui] write failed:", err));
+      // Writes still in flight when the block unmounts reject with "Wraith disposed";
+      // that is expected teardown, not a failure.
+      if (term) void term.write(data).catch((err) => { if (!disposed) console.error("[tui] write failed:", err); });
       else pending.push(data);
     };
     const off = shell.onOutput((tabId, data) => {
@@ -2695,26 +2778,6 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     if (!isLast && isLong && !block.pending && !userToggledRef.current) setExpandedRaw(false);
   }, [isLast, isLong, block.pending]);
 
-  const copyOutput = () => {
-    const text = block.out
-      .flatMap((o) =>
-        o.kind === "lines" ? o.lines :
-        o.kind === "ansi" ? [o.html.replace(/<[^>]+>/g, "")] :
-        o.kind === "pairs" ? o.pairs.map(([k, v]) => `${k}: ${v}`) :
-        o.kind === "table" ? [o.head.join("\t"), ...o.rows.map((r) => r.join("\t"))] :
-        o.kind === "gitlog" ? o.entries.map((e) => `${e.fullHash} ${e.date} ${e.subject} ${e.author}`) :
-        o.kind === "gitbranches" ? o.branches.map((b) => b === o.current ? `* ${b}` : `  ${b}`) :
-        o.kind === "gitdiff" ? o.raw.split("\n") :
-        o.kind === "logfmt" ? o.lines.map((f) => Object.entries(f).map(([k, v]) => `${k}=${v}`).join(" ")) :
-        o.kind === "pretty" ? [o.text] :
-        []
-      )
-      .join("\n");
-    const full = `$ ${block.input}\n${text}`.trimEnd();
-    navigator.clipboard.writeText(full);
-    toast.success(`Copied: ${full.slice(0, 80)}${full.length > 80 ? "…" : ""}`);
-  };
-
   return (
     <article className={`rise group relative pl-9 transition-[background-color,padding,margin,border-radius] duration-150 ${failed ? "rounded-lg bg-alarm/5 py-2 pr-3 -mx-3" : ""} ${gazeFocused ? "rounded-lg ring-1 ring-signal/40 bg-signal/[0.03] px-3 -mx-3" : ""}`}>
       {/* icon center = top-[7px] + half of size = 11px, matching the timeline line at left-[11px] */}
@@ -2745,22 +2808,9 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
             <span>cancel</span>
           </button>
         )}
-        <span className="ml-auto flex items-center gap-3 font-mono text-[11px] tabular-nums text-muted-foreground/70">
-          {failed && <span className="text-alarm/80">exit {block.code}</span>}
-          <BlockDuration block={block} />
-          <span title={block.ts ? stampTitle(block.ts) : undefined}>{block.at}</span>
-          {block.out.length > 0 && (
-            <button
-              onClick={copyOutput}
-              title="Copy output"
-              className="transition-opacity rounded p-0.5 hover:bg-secondary"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-            </button>
-          )}
+        <span className="ml-auto flex items-center gap-3">
+          <BlockModeHints open={modeActive} collapsible={isLong ? (expanded ? "collapse" : "expand") : null} />
+          <BlockMeta block={block} />
         </span>
       </header>
       {/* Inline TUI: terminal mounted directly here for alt-screen apps (vim, htop, fzf).
@@ -2783,7 +2833,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
             style={expanded || !isLong ? undefined : { maxHeight: COLLAPSED_MAX_PX }}
           >
             {block.out.map((o, i) => (
-              <OutView key={i} out={o} input={block.input} ctx={block.ctx || currentCtx} isLast={!!isLast && i === block.out.length - 1} onSearch={onSearch ?? null} {...(onPathClick ? { onPathClick } : {})} />
+              <OutView key={i} out={o} input={block.input} ctx={block.ctx || currentCtx} cwd={"/" + block.cwd.join("/")} isLast={!!isLast && i === block.out.length - 1} onSearch={onSearch ?? null} {...(onPathClick ? { onPathClick } : {})} />
             ))}
           </div>
           {!expanded && isLong && (

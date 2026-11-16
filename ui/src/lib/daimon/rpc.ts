@@ -242,6 +242,8 @@ export const shell = {
   gitDiff:             (cwd: string, args?: string[]) => request<{ raw: string }>({ type: "gitDiff", cwd, args: args ?? [] }),
   getCommitDetail:     (hash: string, cwd: string) => request<CommitDetail>({ type: "commitDetail", hash, cwd }),
   getFileDiff:         (hash: string, filePath: string, cwd: string) => request<string>({ type: "fileDiff", hash, file_path: filePath, cwd }),
+  getFileContent:      (blob: string, filePath: string, cwd: string) =>
+    request<{ content?: string; source?: "blob" | "worktree"; error?: string }>({ type: "fileContent", blob, file_path: filePath, cwd }),
 
   // ── Persistent store ────────────────────────────────────────────────────────
   historyAdd:          (cmd: string, ts: number) => request<boolean>({ type: "historyAdd", cmd, ts }),

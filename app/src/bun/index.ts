@@ -106,12 +106,23 @@ setupNativeDrag(win); // macOS only — native drag via performWindowDragWithEve
 // page keyboard focus and tell it, so the command input is focused right away. The
 // page can't rely on its own `focus` event — on Windows, WebView2 only receives focus
 // when the host forwards it (focusWebview), and only then does that event fire.
-win.on("focus", () => {
-  setTimeout(() => {
-    if (isWindows) focusWebview(win.ptr);
+//
+// Un-minimize is the tricky one: Windows activates the window (our `focus` event) while it
+// is still iconic and only then plays the restore animation, so a single attempt right away
+// finds a minimized window and gives up. Keep trying until the window is restored.
+let focusTimer: ReturnType<typeof setTimeout> | null = null;
+function returnFocusToPage() {
+  if (focusTimer) clearTimeout(focusTimer);
+  let tries = 0;
+  const attempt = () => {
+    focusTimer = null;
+    const done = !isWindows || focusWebview(win.ptr);
+    if (!done && ++tries < 20) { focusTimer = setTimeout(attempt, 50); return; } // up to ~1s
     win.webview.executeJavascript(`window.dispatchEvent(new Event("daimon:host-focus"))`);
-  }, 30); // let the OS finish activation (it focuses the frame window last)
-});
+  };
+  focusTimer = setTimeout(attempt, 30); // let the OS finish activation (it focuses the frame window last)
+}
+win.on("focus", returnFocusToPage);
 
 // Messages from the page: window.__electrobunSendToHost({ type, ... }).
 type HostMessage = { type?: string; blur?: unknown; action?: unknown };
@@ -132,6 +143,9 @@ if (isWindows) {
   const reportState = (force = false) => {
     const now = win.isMaximized();
     if (!force && now === maximized) return;
+    // (Un)maximizing from the caption (double-click, snap) leaves keyboard focus on the frame
+    // window without a new `focus` event: hand it back to the page. Not on the first report.
+    if (maximized !== null) returnFocusToPage();
     maximized = now;
     win.webview.executeJavascript(
       `window.dispatchEvent(new CustomEvent("daimon:window-state", { detail: { maximized: ${now} } }))`,

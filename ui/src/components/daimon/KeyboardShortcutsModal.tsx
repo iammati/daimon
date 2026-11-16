@@ -11,6 +11,7 @@ import {
   KeyboardIcon,
 } from "lucide-react";
 import { Keys, Kbd } from "./Kbd";
+import { usePresence } from "@/lib/daimon/presence";
 
 const SHORTCUTS = [
   { key: "Tab",  label: "Complete",        Icon: TabletSmartphoneIcon },
@@ -26,6 +27,7 @@ const SHORTCUTS = [
 type Props = { open: boolean; onClose: () => void };
 
 export function KeyboardShortcutsModal({ open, onClose }: Props) {
+  const shown = usePresence(open);   // stays mounted while it animates out
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
@@ -35,15 +37,17 @@ export function KeyboardShortcutsModal({ open, onClose }: Props) {
     return () => window.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
-  if (!open) return null;
+  if (!shown) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      data-state={open ? "open" : "closed"}
+      className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-[480px] border border-border bg-card/90 glass shadow-2xl overflow-hidden"
+        data-state={open ? "open" : "closed"}
+        className="modal-panel w-[480px] border border-border bg-card/90 glass shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

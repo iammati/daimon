@@ -70,6 +70,8 @@ pub enum SessionCommand {
     CommitDetail { req_id: String, hash: String, cwd: String },
     /// Get unified diff for a single file in a commit.
     FileDiff { req_id: String, hash: String, file_path: String, cwd: String },
+    /// Full content of a file version: git blob if given/known, else the working-tree file.
+    FileContent { req_id: String, blob: String, file_path: String, cwd: String },
     /// Add a command to history (with ms timestamp).
     HistoryAdd { req_id: String, cmd: String, ts: i64 },
     /// List history entries, most-recent first.

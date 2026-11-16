@@ -10,6 +10,7 @@ import {
 import { Keys } from "./Kbd";
 import { GLASS_DEFAULT, GLASS_MIN_OPACITY, loadGlass, nativeBlurLabel, nativeBlurMode, saveGlass, type Glass } from "@/lib/daimon/appearance";
 import { shell } from "@/lib/daimon/rpc";
+import { usePresence } from "@/lib/daimon/presence";
 
 type Theme = "light" | "dracula";
 
@@ -74,6 +75,7 @@ function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) =>
 }
 
 export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontSize, showBadges, onShowBadges, showPowerline, onShowPowerline }: Props) {
+  const shown = usePresence(open);   // stays mounted while it animates out
   const [category, setCategory] = useState<CategoryId>("appearance");
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -126,7 +128,7 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
     return () => window.removeEventListener("keydown", handler);
   }, [open, onClose, category]);
 
-  if (!open) return null;
+  if (!shown) return null;
 
   const q = search.toLowerCase();
 
@@ -327,11 +329,13 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      data-state={open ? "open" : "closed"}
+      className="modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="w-[760px] h-[520px] bg-card/90 glass border border-border flex overflow-hidden shadow-2xl"
+        data-state={open ? "open" : "closed"}
+        className="modal-panel w-[760px] h-[520px] bg-card/90 glass border border-border flex overflow-hidden shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Sidebar */}

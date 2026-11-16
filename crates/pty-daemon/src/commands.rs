@@ -155,6 +155,42 @@ pub fn git_file_diff(hash: &str, file_path: &str, cwd: &str) -> Value {
     }
 }
 
+/// Largest file `git_file_content` returns; previews of bigger files aren't useful.
+const MAX_FILE_CONTENT: usize = 4 * 1024 * 1024;
+
+/// Full text of one file version, for rendered previews of diffs.
+/// `blob` is the (possibly abbreviated) object id from a diff's `index a..b` line.
+/// When it's empty, all zeros, or not in the object store (e.g. `git diff` against the
+/// working tree), falls back to reading `file_path` relative to the repo root.
+pub fn git_file_content(blob: &str, file_path: &str, cwd: &str) -> Value {
+    let valid_blob = !blob.is_empty() && blob.len() <= 64
+        && blob.chars().all(|c| c.is_ascii_hexdigit())
+        && !blob.chars().all(|c| c == '0');
+    if valid_blob {
+        if let Ok(content) = run("git", &["--no-pager", "cat-file", "blob", blob], Some(cwd)) {
+            if content.len() > MAX_FILE_CONTENT { return json!({ "error": "file too large to preview" }); }
+            return json!({ "content": content, "source": "blob" });
+        }
+    }
+    let rel = std::path::Path::new(file_path);
+    if file_path.is_empty() || rel.is_absolute()
+        || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
+        return json!({ "error": "invalid path" });
+    }
+    let root = run("git", &["rev-parse", "--show-toplevel"], Some(cwd))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| cwd.to_string());
+    let full = std::path::Path::new(&root).join(rel);
+    match std::fs::metadata(&full) {
+        Ok(m) if m.len() as usize > MAX_FILE_CONTENT => json!({ "error": "file too large to preview" }),
+        Ok(_) => match std::fs::read(&full) {
+            Ok(bytes) => json!({ "content": String::from_utf8_lossy(&bytes), "source": "worktree" }),
+            Err(e) => json!({ "error": e.to_string() }),
+        },
+        Err(e) => json!({ "error": e.to_string() }),
+    }
+}
+
 pub fn git_log(cwd: &str, limit: usize) -> Value {
     let limit_str = limit.to_string();
     let fmt = "%H|%h|%aI|%s|%an|%D";

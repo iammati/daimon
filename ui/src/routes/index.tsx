@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast, Toaster } from "sonner";
 import { PlusIcon, XIcon, SunIcon, ZapIcon, PanelLeftIcon, GitBranchIcon, SearchIcon, EyeOffIcon, EyeIcon, SplitSquareHorizontalIcon, ArrowUpRightIcon, LinkIcon } from "lucide-react";
-import { BlockView, PresentationModeContext } from "@/components/daimon/BlockView";
+import { BlockMeta, BlockView, PresentationModeContext } from "@/components/daimon/BlockView";
+import { CommandIcon } from "@/components/daimon/CommandIcon";
 import { Composer } from "@/components/daimon/Composer";
 import { HistoryPanel } from "@/components/daimon/HistoryPanel";
 import { ContextSwitcher } from "@/components/daimon/ContextSwitcher";
@@ -18,6 +19,7 @@ import { KeyboardShortcutsModal } from "@/components/daimon/KeyboardShortcutsMod
 import { SettingsModal } from "@/components/daimon/SettingsModal";
 import { PowerlineStatus } from "@/components/daimon/PowerlineStatus";
 import { TitleBar } from "@/components/daimon/TitleBar";
+import { usePresence } from "@/lib/daimon/presence";
 
 const TITLE = "daimon — a terminal for Converged Cloud operators";
 const DESC =
@@ -151,6 +153,8 @@ function Daimon() {
   const [sessions, setSessions] = useState<Session[]>(() => [makeSession()]);
   const [activeId, setActiveId] = useState(() => sessions[0]!.id);
   const active = sessions.find((s) => s.id === activeId) ?? sessions[0]!;
+  // The block whose command line has scrolled out above the active pane's viewport — shown in the header.
+  const [headerBlockId, setHeaderBlockId] = useState<string | null>(null);
   // Split children are not top-level tabs
   const splitChildIds = new Set(sessions.flatMap((s) => s.splitId ? [s.splitId] : []));
   const topLevelSessions = sessions.filter((s) => !splitChildIds.has(s.id));
@@ -161,6 +165,9 @@ function Daimon() {
   // sessionId -> blockId for currently-active inline TUI blocks
   const [tuiBlockIds, setTuiBlockIds] = useState<Map<string, string>>(new Map());
   const [altScreenActive, setAltScreenActive] = useState(false);
+  // Not while a TUI (claude, vim, k9s, …) owns the pane: the command above it means nothing there.
+  const tuiInActive = tuiBlockIds.has(active.id) || altScreenActive;
+  const headerBlock = headerBlockId && !tuiInActive ? active.blocks.find((b) => b.id === headerBlockId) : undefined;
   const [presentationMode, setPresentationMode] = useState(false);
   // Toast outside the state updater — updaters can run twice (StrictMode / batching), which would
   // fire the toast twice. Derive the next value from current state here instead.
@@ -184,6 +191,7 @@ function Daimon() {
   const [showBadges, setShowBadges] = useState(true);
   const [showPowerline, setShowPowerline] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchShown = usePresence(searchOpen);   // stays mounted while it animates out
   const [historyOpen, setHistoryOpen] = useState(false);
   const [ctxSwitcherOpen, setCtxSwitcherOpen] = useState(0);
   const [ctxSwitcherClose, setCtxSwitcherClose] = useState(0);
@@ -379,7 +387,16 @@ function Daimon() {
   const effectiveBlockModActive = pagerActive ? false : blockModActive;
 
   const scrollContainersRef = useRef<Map<string, HTMLDivElement>>(new Map());
-  const atBottomRef = useRef(true);
+  // Per session: does its pane follow new output down? It stops only when the user scrolls up
+  // and starts again once they are back at the very bottom. Deciding it from the position on
+  // every scroll event isn't enough: the browser scrolls on its own too (an earlier block
+  // collapsing, scroll anchoring), and that must not stop the following.
+  const followRef = useRef<Map<string, boolean>>(new Map());
+  const lastScrollTopRef = useRef<Map<string, number>>(new Map());
+  const contentHeightRef = useRef<Map<string, number>>(new Map());
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const follows = (sessionId: string) => followRef.current.get(sessionId) ?? true;
 
   const scrollToBottom = (sessionId?: string) => {
     requestAnimationFrame(() => {
@@ -389,24 +406,81 @@ function Daimon() {
     });
   };
 
-  const isAtBottom = () => {
-    const el = scrollContainersRef.current.get(activeId);
-    if (!el) return true;
-    return el.scrollTop + el.clientHeight >= el.scrollHeight - 80;
+  const atBottom = (el: HTMLElement) => el.scrollHeight - el.clientHeight - el.scrollTop <= 2;
+
+  /** For the active session: the last block whose own header is above the top of the viewport. */
+  const updateHeaderBlock = (sessionId: string) => {
+    if (sessionId !== activeIdRef.current) return;
+    const el = scrollContainersRef.current.get(sessionId);
+    let id: string | null = null;
+    if (el) {
+      const top = el.getBoundingClientRect().top;
+      const blocks = el.querySelectorAll<HTMLElement>("[data-block-id]");
+      // Block headers go down the page in order: binary-search the last one that is out above.
+      let lo = 0, hi = blocks.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const b = blocks[mid]!;
+        const head = b.querySelector("header") ?? b;
+        if (head.getBoundingClientRect().bottom <= top) { id = b.dataset["blockId"] ?? null; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+    }
+    setHeaderBlockId(id);
   };
+
+  /** A pane's content changed size: keep it scrolled down, or tell the user there is more below. */
+  const onContentResize = (sessionId: string) => {
+    const el = scrollContainersRef.current.get(sessionId);
+    if (!el) return;
+    const prev = contentHeightRef.current.get(sessionId) ?? 0;
+    contentHeightRef.current.set(sessionId, el.scrollHeight);
+    if (follows(sessionId)) {
+      el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current.set(sessionId, el.scrollTop);
+    } else if (el.scrollHeight > prev && sessionId === activeIdRef.current) {
+      toast("↓ New output", { id: "new-output", duration: Infinity });
+    }
+    updateHeaderBlock(sessionId);
+  };
+
+  // One observer for the content of every pane; each observed element names its session.
+  const contentObserver = useMemo(() => typeof ResizeObserver === "undefined" ? null : new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const id = (e.target as HTMLElement).dataset["followSession"];
+      if (id) onContentResize(id);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- reads refs only
+  }), []);
+  const observedContentRef = useRef<Map<string, HTMLElement>>(new Map());
+  const observeContent = (sessionId: string, el: HTMLElement | null) => {
+    const old = observedContentRef.current.get(sessionId);
+    if (el) {
+      if (old === el) return;
+      if (old) contentObserver?.unobserve(old);
+      contentObserver?.observe(el);
+      observedContentRef.current.set(sessionId, el);
+    } else if (old) {
+      // null comes on every re-render too (inline ref); only let go of a pane that is gone.
+      queueMicrotask(() => {
+        if (old.isConnected || observedContentRef.current.get(sessionId) !== old) return;
+        contentObserver?.unobserve(old);
+        observedContentRef.current.delete(sessionId);
+      });
+    }
+  };
+  useEffect(() => () => contentObserver?.disconnect(), [contentObserver]);
 
   const updateSession = (id: string, patch: Partial<Session>) => {
     setSessions((prev) => prev.map((s) => s.id === id ? { ...s, ...patch } : s));
   };
 
+  // Switching to a session that is still following: nothing to tell about the one left behind.
   useEffect(() => {
-    if (!atBottomRef.current) {
-      toast("↓ New output", { id: "new-output", duration: Infinity });
-      return;
-    }
-    scrollToBottom();
+    if (follows(activeId)) toast.dismiss("new-output");
+    updateHeaderBlock(activeId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active.blocks]);
+  }, [activeId]);
 
   // PTY output is now consumed directly by BlockView's inline terminal subscription
 
@@ -534,6 +608,12 @@ function Daimon() {
   useEffect(() => {
     const onReturn = () => {
       if (document.visibilityState === "hidden") return;
+      // Now, and once more shortly after: on restore the webview's own focus can land a
+      // moment after the event that announced it, and a focus() before that is lost.
+      tryFocus();
+      setTimeout(tryFocus, 120);
+    };
+    const tryFocus = () => {
       requestAnimationFrame(() => {
         if (anyModalOpenRef.current) return;
         const ae = document.activeElement as HTMLElement | null;
@@ -758,9 +838,16 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hoveredBlockId, active.blocks, altScreenActive, tuiBlockIds]);
 
-  const handleScroll = () => {
-    atBottomRef.current = isAtBottom();
-    if (atBottomRef.current) toast.dismiss("new-output");
+  const handleScroll = (sessionId: string, el: HTMLElement) => {
+    updateHeaderBlock(sessionId);
+    const prev = lastScrollTopRef.current.get(sessionId) ?? el.scrollTop;
+    lastScrollTopRef.current.set(sessionId, el.scrollTop);
+    if (atBottom(el)) {
+      followRef.current.set(sessionId, true);
+      if (sessionId === activeIdRef.current) toast.dismiss("new-output");
+    } else if (el.scrollTop < prev) {
+      followRef.current.set(sessionId, false);
+    }
   };
 
   const onSplitDragStart = (e: React.MouseEvent) => {
@@ -785,7 +872,7 @@ function Daimon() {
   const submit = async (cmd: string, forSessionId?: string) => {
     const sessionId = forSessionId ?? activeId;
     const sess = sessions.find((s) => s.id === sessionId) ?? sessions[0]!;
-    atBottomRef.current = true;
+    followRef.current.set(sessionId, true);
 
     // If a streaming-interactive session (ssh/mosh) is active, forward input to PTY directly.
     // Check module-level map — immune to React stale closure.
@@ -863,7 +950,7 @@ function Daimon() {
       }
       return { ...s, state: next, lastCmd: cmd, blocks: newBlocks };
     }));
-    atBottomRef.current = true;
+    followRef.current.set(sessionId, true);
     scrollToBottom(sessionId);
     setTimeout(() => window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } })), 1);
   };
@@ -882,12 +969,12 @@ function Daimon() {
             if (el) scrollContainersRef.current.set(paneSessionId, el);
             else scrollContainersRef.current.delete(paneSessionId);
           }}
-          onScroll={isFocused ? handleScroll : undefined}
-          className={`flex-1 overflow-y-auto px-6 py-8${isFocused ? "" : " cursor-pointer"}`}
+          onScroll={(e) => handleScroll(paneSessionId, e.currentTarget)}
+          className={`flex-1 overflow-y-auto px-6 py-8 ${isFocused ? "" : "cursor-pointer"}`}
           style={{ "--terminal-font-size": fontSize + "px" } as React.CSSProperties}
           onClick={() => { if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); }}
         >
-          <div className="w-full">
+          <div className="w-full" data-follow-session={paneSessionId} ref={(el) => observeContent(paneSessionId, el)}>
             {pane.blocks.length === 0 ? (
               <LandingPage
                 blocks={pane.blocks}
@@ -901,28 +988,14 @@ function Daimon() {
                 {pane.blocks.map((b, i) => (
                   <div
                     key={b.id}
+                    data-block-id={b.id}
                     ref={(el) => { if (el) blockRefsMap.current.set(b.id, el); else blockRefsMap.current.delete(b.id); }}
-                    className={`relative py-7 rounded-lg transition-all duration-100 ${effectiveHoveredBlockId === b.id && effectiveBlockModActive ? "outline outline-2 outline-dashed outline-signal/50 outline-offset-4 bg-signal/[0.03]" : ""}`}
+                    data-ring={effectiveHoveredBlockId === b.id && effectiveBlockModActive ? "on" : undefined}
+                    className="block-ring relative py-7 rounded-lg"
                     onMouseEnter={() => { if (!pagerActive) setHoveredBlockId(b.id); if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); }}
                     onMouseLeave={() => setHoveredBlockId(null)}
                   >
-                    <BlockView block={b} onRerun={(cmd) => submit(cmd, paneSessionId)} isLast={i === pane.blocks.length - 1} currentCtx={pane.state.ctx.name} sessionId={pane.id} isTuiActive={tuiBlockIds.get(pane.id) === b.id} promptingForInput={panePrompting && !!b.pending} onSearch={(q) => { setGlobalSearchQuery(q); setGlobalSearchOpen(true); }} onPathClick={(path) => { const expanded = path.startsWith("~") ? __HOME__ + path.slice(1) : path; const hasExt = /\.[^/]+$/.test(expanded.split("/").pop() ?? ""); const dir = hasExt ? expanded.split("/").slice(0, -1).join("/") || "/" : expanded; submit("cd " + JSON.stringify(dir), paneSessionId); toast("cd " + dir, { duration: 2000 }); }} />
-                    {effectiveHoveredBlockId === b.id && effectiveBlockModActive && (
-                      <div className="absolute top-2 right-2 flex items-center gap-1 rounded-md border border-signal/30 bg-card/90 px-2 py-1 backdrop-blur-sm shadow-sm">
-                        {(() => {
-                          const collapsible = blockRefsMap.current.get(b.id)?.querySelector<HTMLElement>("[data-collapsible]")?.dataset["collapsible"];
-                          const actions: [string, string][] = [["C", "copy all"], ["I", "cmd"], ["O", "output"], ["R", "re-run"]];
-                          if (collapsible) actions.push(["E", collapsible === "expanded" ? "collapse" : "expand"]);
-                          return actions.map(([k, label], ai) => (
-                            <span key={k} className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground">
-                              <kbd className="rounded bg-signal/15 px-1 py-0.5 text-signal font-semibold">{k}</kbd>
-                              <span>{label}</span>
-                              {ai < actions.length - 1 && <span className="text-border mx-0.5">·</span>}
-                            </span>
-                          ));
-                        })()}
-                      </div>
-                    )}
+                    <BlockView block={b} modeActive={effectiveHoveredBlockId === b.id && effectiveBlockModActive} onRerun={(cmd) => submit(cmd, paneSessionId)} isLast={i === pane.blocks.length - 1} currentCtx={pane.state.ctx.name} sessionId={pane.id} isTuiActive={tuiBlockIds.get(pane.id) === b.id} promptingForInput={panePrompting && !!b.pending} onSearch={(q) => { setGlobalSearchQuery(q); setGlobalSearchOpen(true); }} onPathClick={(path) => { const expanded = path.startsWith("~") ? __HOME__ + path.slice(1) : path; const hasExt = /\.[^/]+$/.test(expanded.split("/").pop() ?? ""); const dir = hasExt ? expanded.split("/").slice(0, -1).join("/") || "/" : expanded; submit("cd " + JSON.stringify(dir), paneSessionId); toast("cd " + dir, { duration: 2000 }); }} />
                   </div>
                 ))}
               </div>
@@ -1147,7 +1220,8 @@ function Daimon() {
                         }`}
                       >
                         <span className="shrink-0 flex items-center justify-center size-6 rounded bg-sidebar-foreground/10 font-mono text-[11px] text-sidebar-foreground/60">
-                          {!isParent ? <SplitSquareHorizontalIcon className="size-3" /> : ">_"}
+                          {/* What the session's last command runs (claude, k9s, git, …), kept after it finishes. */}
+                          <CommandIcon cmd={sess.blocks.at(-1)?.input ?? sess.lastCmd} fallback={!isParent ? <SplitSquareHorizontalIcon className="size-3" /> : ">_"} />
                         </span>
                         {renamingId === sess.id ? (
                           <input
@@ -1257,8 +1331,8 @@ function Daimon() {
           onClose={() => { setGlobalSearchOpen(false); setGlobalSearchQuery(""); }}
         />
         {/* Search overlay */}
-        {searchOpen && (
-          <div className="absolute top-16 right-4 z-50 w-96 rounded-xl border border-border bg-card/90 glass shadow-2xl">
+        {searchShown && (
+          <div data-state={searchOpen ? "open" : "closed"} className="popover-panel absolute top-16 right-4 z-50 w-96 rounded-xl border border-border bg-card/90 glass shadow-2xl">
             <div className="flex items-center gap-2 border-b border-border px-3 py-2">
               <SearchIcon className="size-4 text-muted-foreground/50" />
               <input
@@ -1308,10 +1382,27 @@ function Daimon() {
             <PanelLeftIcon className="size-4" />
           </button>
 
-          <span className="no-drag flex items-center gap-2 font-mono text-[13px] text-foreground">
-            {sessionLabel(active)}
-            <span className="text-muted-foreground/40">/</span>
-          </span>
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="no-drag flex items-center gap-2 font-mono text-[13px] text-foreground">
+              {sessionLabel(active)}
+              <span className="text-muted-foreground/40">/</span>
+            </span>
+            {/* The command of the block scrolled out above the viewport, sticky like a section
+                heading: click to scroll back to its start. */}
+            {/* Always takes its line, so the header doesn't change height as you scroll. */}
+            <div className="no-drag flex h-[18px] min-w-0 items-center gap-3">
+              {headerBlock && (<>
+                <button
+                  onClick={() => blockRefsMap.current.get(headerBlock.id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                  title={headerBlock.input}
+                  className={`min-w-0 truncate font-mono text-[12px] underline-offset-4 hover:underline ${!headerBlock.pending && headerBlock.code !== 0 ? "text-alarm" : "text-muted-foreground"}`}
+                >
+                  {headerBlock.input}
+                </button>
+                <BlockMeta block={headerBlock} className="shrink-0" />
+              </>)}
+            </div>
+          </div>
 
           {showBadges && !showPowerline && <HeaderExtensionSlot extensions={[<OpenStackBadge region={osRegion} project={osProject} domain={osDomain} />]} />}
 

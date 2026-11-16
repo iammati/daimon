@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SearchIcon, XIcon, ArrowUpIcon, ArrowDownIcon, ChevronRightIcon } from "lucide-react";
 import { Keys } from "./Kbd";
+import { usePresence } from "@/lib/daimon/presence";
 
 
 type Result = {
@@ -172,6 +173,7 @@ function DetailView({ group, query, onRun, onBack }: {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function GlobalSearch({ open, query, onQueryChange, results, loading, onSelect, onClose }: Props) {
+  const shown = usePresence(open);   // stays mounted while it animates out
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const [showHistory, setShowHistory] = useState(true);
@@ -185,7 +187,7 @@ export function GlobalSearch({ open, query, onQueryChange, results, loading, onS
 
   useEffect(() => { setCursor(0); setDetail(null); }, [results, showHistory, sort]);
 
-  if (!open) return null;
+  if (!shown) return null;
 
   const visible = results.filter(r => showHistory || r.cwd !== "");
   const grouped = groupResults(visible);
@@ -234,8 +236,8 @@ export function GlobalSearch({ open, query, onQueryChange, results, loading, onS
 
   if (detail) {
     return (
-      <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/50 backdrop-blur-sm" onClick={onClose}>
-        <div className="w-[680px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()} data-detail tabIndex={-1}>
+      <div data-state={open ? "open" : "closed"} className="modal-backdrop fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/50 backdrop-blur-sm" onClick={onClose}>
+        <div data-state={open ? "open" : "closed"} className="modal-panel w-[680px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()} data-detail tabIndex={-1}>
           <DetailView
             group={detail}
             query={query}
@@ -248,8 +250,8 @@ export function GlobalSearch({ open, query, onQueryChange, results, loading, onS
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-[680px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+    <div data-state={open ? "open" : "closed"} className="modal-backdrop fixed inset-0 z-50 flex items-start justify-center pt-[12vh] bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div data-state={open ? "open" : "closed"} className="modal-panel w-[680px] border border-border bg-card/90 glass shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
 
         {/* Search bar */}
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">

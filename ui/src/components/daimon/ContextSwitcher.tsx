@@ -3,6 +3,7 @@ import { RefreshCwIcon } from "lucide-react";
 import { shell } from "@/lib/daimon/rpc";
 import kubernetesIcon from "@/assets/kubernetes-icon.svg";
 import { Keys } from "./Kbd";
+import { usePresence } from "@/lib/daimon/presence";
 
 function highlight(text: string, query: string): React.ReactNode {
   if (!query) return text;
@@ -19,6 +20,7 @@ function highlight(text: string, query: string): React.ReactNode {
 
 export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpenChange }: { ctxName: string; onPick: (name: string) => void; forceOpen?: number; forceClose?: number; onOpenChange?: (open: boolean) => void }) {
   const [open, setOpen] = useState(false);
+  const shown = usePresence(open);   // stays mounted while it animates out
   const [cursor, setCursor] = useState(0);
 
   const openRef = useRef(open);
@@ -134,8 +136,8 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
         </button>
       </div>
 
-      {open && (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-20 w-72 overflow-hidden rounded-xl border border-border bg-card/90 glass shadow-[0_24px_60px_-28px_oklch(0.2_0.02_265_/_0.45)]">
+      {shown && (
+        <div data-state={open ? "open" : "closed"} className="popover-panel absolute right-0 top-[calc(100%+0.5rem)] z-20 w-72 overflow-hidden rounded-xl border border-border bg-card/90 glass shadow-[0_24px_60px_-28px_oklch(0.2_0.02_265_/_0.45)]">
           <div className="flex items-center gap-2 border-b border-border px-3.5 py-2">
             <input
               ref={inputRef}
