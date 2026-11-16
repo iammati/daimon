@@ -93,13 +93,29 @@ const PTY_STATE_RE = /\x1b\[\?[0-9;]*[hlsur]|\x1b[78]|\x1b\[[0-9;]*r/g;
 const inAltScreenMap = new Map<string, boolean>();
 function isAltScreen(tabId: string) { return inAltScreenMap.get(tabId) ?? false; }
 export function getAltScreen(tabId: string) { return inAltScreenMap.get(tabId) ?? false; }
-shell.onAltScreen((tabId, enter) => {
+// Programs like nano and less redraw on SIGWINCH by leaving and re-entering the alt screen
+// (1049l + 1049h back to back). Taken literally, the exit unmounts the inline terminal and the
+// enter mounts a fresh one, whose fit resizes the PTY again: an endless remount loop. So an
+// exit only counts once the program has stayed out of the alt screen for a moment.
+const ALT_EXIT_GRACE_MS = 150;
+const altExitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function cancelAltExit(tabId: string) {
+  const t = altExitTimers.get(tabId);
+  if (t) { clearTimeout(t); altExitTimers.delete(tabId); }
+}
+function applyAltScreen(tabId: string, enter: boolean) {
   inAltScreenMap.set(tabId, enter);
   altScreenListenerMap.get(tabId)?.forEach((fn) => fn(enter));
+  // Also fire TUI notification so BlockView mounts the terminal
+  if (enter) tuiListenerMap.get(tabId)?.forEach((fn) => fn(true));
+}
+shell.onAltScreen((tabId, enter) => {
+  cancelAltExit(tabId);
   if (enter) {
-    // Also fire TUI notification so BlockView mounts the terminal
-    tuiListenerMap.get(tabId)?.forEach((fn) => fn(true));
+    if (!isAltScreen(tabId)) applyAltScreen(tabId, true); // else: a redraw cycle — nothing changed
+    return;
   }
+  altExitTimers.set(tabId, setTimeout(() => { altExitTimers.delete(tabId); applyAltScreen(tabId, false); }, ALT_EXIT_GRACE_MS));
 });
 
 // Per-tab streaming-interactive state (ssh/mosh/telnet running as streaming block).
@@ -970,6 +986,7 @@ export function onAltScreenChange(tabId: string, fn: AltScreenListener): () => v
 }
 
 export function notifyAltScreen(tabId: string, active: boolean) {
+  cancelAltExit(tabId);
   inAltScreenMap.set(tabId, active);
   altScreenListenerMap.get(tabId)?.forEach((fn) => fn(active));
 }

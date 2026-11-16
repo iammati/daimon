@@ -8,7 +8,7 @@ import { MarkdownDiffView, MarkdownModeToggle } from "./MarkdownDiffView";
 import { isMarkdownPath, useMarkdownRendered, toggleMarkdownRendered } from "@/lib/daimon/markdownMode";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
-import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
+import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, onAltScreenChange, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
 import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode, GitLogRef } from "@/lib/daimon/shell";
 import { Wraith } from "wraithterm";
 import hljs from "highlight.js/lib/core";
@@ -2681,11 +2681,9 @@ export function BlockView({ block, modeActive = false, onRerun, isLast, currentC
     if (!sessionId) return;
     // Re-check in case event arrived between useState init and effect setup
     setTuiFullscreen(getAltScreen(sessionId));
-    const unsub = shell.onAltScreen((tabId, enter) => {
-      if (tabId !== sessionId) return;
-      setTuiFullscreen(enter);
-    });
-    return () => { unsub(); };
+    // The debounced per-tab signal, not the raw daemon event: a program's exit+re-enter redraw
+    // must not flip fullscreen → inline → fullscreen (each flip refits and resizes the PTY).
+    return onAltScreenChange(sessionId, setTuiFullscreen);
   }, [sessionId]);
   useEffect(() => {
     const el = inlineTuiRef.current;
@@ -2753,8 +2751,13 @@ export function BlockView({ block, modeActive = false, onRerun, isLast, currentC
         t.onResize(({ cols, rows }) => resizePty(sessionId, cols, rows)),
         t.onError((err) => console.error("[tui]", err)),
       );
-      tuiFitRef.current = () => { t.fit(); resizePty(sessionId, t.cols, t.rows); };
-      resizePty(sessionId, t.cols, t.rows);
+      // The PTY follows the terminal's *applied* size (onResize). Sending t.cols/t.rows right
+      // after fit() would send the pre-fit size (80x24 on a fresh mount): a needless SIGWINCH
+      // that makes nano/less redraw. Only if the first fit changed nothing, send it once.
+      tuiFitRef.current = () => t.fit();
+      let sized = false;
+      subs.push(t.onResize(() => { sized = true; }));
+      requestAnimationFrame(() => requestAnimationFrame(() => { if (!disposed && !sized) resizePty(sessionId, t.cols, t.rows); }));
       for (const chunk of pending.splice(0)) feed(chunk);
       t.focus();
       // Resumed full-screen program (the UI restarted while it ran): now that this
