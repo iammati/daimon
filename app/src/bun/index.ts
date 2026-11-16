@@ -6,7 +6,8 @@ import {
 } from "./winBackdrop";
 import { enablePinchZoom } from "./macMagnification";
 import { setupNativeDrag } from "./macWindowDrag";
-import { focusWebview } from "./winFocus";
+import { describeFocus, isForeground } from "./winFocus";
+import { focusLog } from "./focusLog";
 import { prepareCustomFrame, startTopResize } from "./winFrame";
 import { setWindowIcon } from "./winIcon";
 import { resolve } from "node:path";
@@ -102,30 +103,43 @@ if (isWindows && !setWindowIcon(win.ptr, resolve(import.meta.dir, "../icon.ico")
 enablePinchZoom(); // macOS only
 setupNativeDrag(win); // macOS only — native drag via performWindowDragWithEvent
 
-// Window re-activated (un-minimize, alt-tab / click back from another app): give the
-// page keyboard focus and tell it, so the command input is focused right away. The
-// page can't rely on its own `focus` event — on Windows, WebView2 only receives focus
-// when the host forwards it (focusWebview), and only then does that event fire.
+// Window re-activated (un-minimize, alt-tab / click back from another app) or (un)maximized:
+// tell the page, so it can put the cursor back in the command input.
 //
-// Un-minimize is the tricky one: Windows activates the window (our `focus` event) while it
-// is still iconic and only then plays the restore animation, so a single attempt right away
-// finds a minimized window and gives up. Keep trying until the window is restored.
+// How the page gets keyboard focus on Windows (traced with the focus log, see focusLog.ts):
+// WebView2 tracks focus through its controller, so a raw Win32 SetFocus on its input window
+// leaves document.hasFocus() false. Electrobun's activateWindow does give the page focus
+// (a real `focus` event follows) — but every call blurs and refocuses the page, so it is only
+// done when the page asks for it ({ type: "window", action: "focus" }), i.e. when it is
+// visible, wants the command input focused and finds document.hasFocus() false.
+//
+// On un-minimize Windows reports activation while the window is still iconic and only then
+// plays the restore animation, so wait until the window is really in front before telling
+// the page.
+const HOST_FOCUS_JS = `window.dispatchEvent(new Event("daimon:host-focus"))`;
 let focusTimer: ReturnType<typeof setTimeout> | null = null;
-function returnFocusToPage() {
+function returnFocusToPage(why: string) {
   if (focusTimer) clearTimeout(focusTimer);
-  let tries = 0;
-  const attempt = () => {
+  focusLog("host", `return focus (${why}) ${describeFocus(win.ptr)}`);
+  if (!isWindows) {
+    focusTimer = setTimeout(() => { focusTimer = null; win.webview.executeJavascript(HOST_FOCUS_JS); }, 30);
+    return;
+  }
+  const start = Date.now();
+  const poll = () => {
     focusTimer = null;
-    const done = !isWindows || focusWebview(win.ptr);
-    if (!done && ++tries < 20) { focusTimer = setTimeout(attempt, 50); return; } // up to ~1s
-    win.webview.executeJavascript(`window.dispatchEvent(new Event("daimon:host-focus"))`);
+    const ready = isForeground(win.ptr);
+    if (!ready && Date.now() - start < 1500) { focusTimer = setTimeout(poll, 50); return; }
+    focusLog("host", `  ${ready ? "in front" : "gave up waiting"} after ${Date.now() - start}ms → tell page; ${describeFocus(win.ptr)}`);
+    if (ready) win.webview.executeJavascript(HOST_FOCUS_JS);
   };
-  focusTimer = setTimeout(attempt, 30); // let the OS finish activation (it focuses the frame window last)
+  poll();
 }
-win.on("focus", returnFocusToPage);
+win.on("focus", () => returnFocusToPage("native focus"));
+win.on("blur", () => focusLog("host", `native blur ${describeFocus(win.ptr)}`));
 
 // Messages from the page: window.__electrobunSendToHost({ type, ... }).
-type HostMessage = { type?: string; blur?: unknown; action?: unknown };
+type HostMessage = { type?: string; blur?: unknown; action?: unknown; msg?: unknown };
 const hostMessageHandlers: ((msg: HostMessage) => void)[] = [];
 (win.webview as unknown as { on(name: string, handler: (event: unknown) => void): void }).on(
   "host-message",
@@ -134,6 +148,10 @@ const hostMessageHandlers: ((msg: HostMessage) => void)[] = [];
     if (msg) for (const handle of hostMessageHandlers) handle(msg);
   },
 );
+// The page's half of the focus log.
+hostMessageHandlers.push((msg) => {
+  if (msg.type === "focus-log" && typeof msg.msg === "string") focusLog("page", msg.msg);
+});
 
 // Windows: the page's title bar. Its buttons arrive as { type: "window", action }, and
 // it is told when the window is (un)maximized so it can swap the maximize/restore icon.
@@ -145,18 +163,27 @@ if (isWindows) {
     if (!force && now === maximized) return;
     // (Un)maximizing from the caption (double-click, snap) leaves keyboard focus on the frame
     // window without a new `focus` event: hand it back to the page. Not on the first report.
-    if (maximized !== null) returnFocusToPage();
+    focusLog("host", `window state: maximized ${maximized} → ${now}${force ? " (asked)" : ""}`);
+    if (maximized !== null && now !== maximized) returnFocusToPage("maximized changed");
     maximized = now;
     win.webview.executeJavascript(
       `window.dispatchEvent(new CustomEvent("daimon:window-state", { detail: { maximized: ${now} } }))`,
     );
   };
-  win.on("resize", () => reportState());
+  win.on("resize", () => { focusLog("host", `native resize ${describeFocus(win.ptr)}`); reportState(); });
   hostMessageHandlers.push((msg) => {
     if (msg.type !== "window") return;
+    if (msg.action !== "state") focusLog("host", `title bar: ${String(msg.action)}`);
     switch (msg.action) {
       case "minimize": win.minimize(); break;
       case "maximize": if (win.isMaximized()) win.unmaximize(); else win.maximize(); break;
+      case "focus": {
+        // The page wants keyboard focus (see returnFocusToPage). Never steal it from another app.
+        const front = isForeground(win.ptr);
+        focusLog("host", `page asks for focus → ${front ? "activate" : "not in front, ignored"}`);
+        if (front) win.activate();
+        break;
+      }
       case "close": win.close(); break;
       case "resize-top": startTopResize(win.ptr); break;
       case "state": reportState(true); break;

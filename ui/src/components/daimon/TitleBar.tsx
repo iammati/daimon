@@ -47,10 +47,12 @@ export function TitleBar({ left }: { left?: React.ReactNode }) {
       // pass it down to the control underneath.
       onMouseDown={(e) => {
         if (e.target !== e.currentTarget || e.button !== 0) return;
+        // A press on the caption (to drag, or double-click to maximize) must not move focus
+        // out of the command input: Windows does the drag/maximize, the page only blurs.
+        e.preventDefault();
         const under = document.elementsFromPoint(e.clientX, e.clientY).find((el) => !e.currentTarget.contains(el));
         const control = under?.closest<HTMLElement>("input, textarea, button, a, [role='button']");
         if (!control) return;
-        e.preventDefault();
         if (control.matches("input, textarea")) control.focus(); else control.click();
       }}
     >

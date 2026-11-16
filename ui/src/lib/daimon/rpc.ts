@@ -166,7 +166,7 @@ function send(msg: object) {
 
 type GitStatusFile = { xy: string; path: string; from?: string; add?: number; del?: number };
 type GitStatus = { branch: string; upstream?: string | null; ahead: number; behind: number; staged: GitStatusFile[]; unstaged: GitStatusFile[]; untracked: string[]; added?: number; removed?: number; error?: string };
-type LogEntry  = { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean };
+type LogEntry  = { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean; unpushed?: boolean; unpushedTo?: string; refs?: { name: string; kind: "local" | "remote" | "tag"; current: boolean; trunk: boolean; synced: string[] }[] };
 type CommitDetail = { files: { status: string; path: string; additions: number; deletions: number }[]; body: string };
 
 /** A shell as the daemon has it (see `attach`). */
@@ -238,7 +238,7 @@ export const shell = {
   saveSessions:        () => Promise.resolve(),
   gitStatus:           (cwd: string) => request<GitStatus>({ type: "gitStatus", cwd }),
   listBranches:        (cwd: string) => request<{ branches: string[]; current: string; trunk?: string | null; nodes?: GitBranchNode[] }>({ type: "gitBranch", cwd }),
-  listLog:             (cwd: string, limit?: number) => request<LogEntry[]>({ type: "gitLog", cwd, limit: limit ?? 50 }),
+  listLog:             (cwd: string, limit?: number, args?: string[]) => request<LogEntry[] | { error: string }>({ type: "gitLog", cwd, limit: limit ?? 50, args: args ?? [] }),
   gitDiff:             (cwd: string, args?: string[]) => request<{ raw: string }>({ type: "gitDiff", cwd, args: args ?? [] }),
   getCommitDetail:     (hash: string, cwd: string) => request<CommitDetail>({ type: "commitDetail", hash, cwd }),
   getFileDiff:         (hash: string, filePath: string, cwd: string) => request<string>({ type: "fileDiff", hash, file_path: filePath, cwd }),

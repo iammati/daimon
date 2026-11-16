@@ -19,6 +19,7 @@ import { KeyboardShortcutsModal } from "@/components/daimon/KeyboardShortcutsMod
 import { SettingsModal } from "@/components/daimon/SettingsModal";
 import { PowerlineStatus } from "@/components/daimon/PowerlineStatus";
 import { TitleBar } from "@/components/daimon/TitleBar";
+import { describeEl, focusLog, requestPageFocus } from "@/lib/daimon/focusLog";
 import { usePresence } from "@/lib/daimon/presence";
 
 const TITLE = "daimon — a terminal for Converged Cloud operators";
@@ -108,11 +109,18 @@ function highlight(text: string, query: string): React.ReactNode {
 }
 
 // Detect if a program is actively prompting for user input (Y/n, password, etc.)
-const INPUT_PROMPT_RE = /\?\s*$|\[y\/n\]\s*$|\(yes\/no\)\s*$|password[:\s]*$/i;
+// Only drives styling/masking: stdin input is always accepted while a command runs.
+const INPUT_PROMPT_RE = /[?:>]\s*$|\[[yn]\/[yn]\]\s*$|\((yes\/no|[yn]\/[yn])[^)]*\)\s*$/i;
+// sudo ("[sudo] password for dev:"), ssh keys ("Enter passphrase for key …:"), PINs, tokens.
+const SECRET_PROMPT_RE = /(pass(word|phrase)|\bpin\b|secret|token|otp|verification code)[^\n]*[:>]\s*$/i;
+function lastOutputLine(b: Block): string {
+  return blockOutputText(b).trimEnd().split("\n").pop() ?? "";
+}
 function isPromptingForInput(b: Block): boolean {
-  const text = blockOutputText(b);
-  const lastLine = text.trimEnd().split("\n").pop() ?? "";
-  return INPUT_PROMPT_RE.test(lastLine);
+  return INPUT_PROMPT_RE.test(lastOutputLine(b));
+}
+function isPromptingForSecret(b: Block): boolean {
+  return SECRET_PROMPT_RE.test(lastOutputLine(b));
 }
 
 function blockOutputText(b: Block): string {
@@ -606,34 +614,50 @@ function Daimon() {
   const anyModalOpenRef = useRef(anyModalOpen);
   anyModalOpenRef.current = anyModalOpen;
   useEffect(() => {
-    const onReturn = () => {
+    const onReturn = (e: Event) => {
+      focusLog(`event ${e.type}`);
       if (document.visibilityState === "hidden") return;
-      // Now, and once more shortly after: on restore the webview's own focus can land a
-      // moment after the event that announced it, and a focus() before that is lost.
-      tryFocus();
-      setTimeout(tryFocus, 120);
+      tryFocus(e.type);
     };
-    const tryFocus = () => {
+    const tryFocus = (why: string) => {
       requestAnimationFrame(() => {
-        if (anyModalOpenRef.current) return;
+        if (anyModalOpenRef.current) { focusLog(`skip (${why}): modal open`); return; }
         const ae = document.activeElement as HTMLElement | null;
         // Another text field kept focus (pager search, rename…) — leave it. The composer
         // itself doesn't count: it's often still activeElement while the webview had no
         // keyboard focus, and re-focusing it is what puts the caret back.
         const otherField = ae && !ae.hasAttribute("data-composer") &&
           (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
-        if (otherField) return;
+        if (otherField) { focusLog(`skip (${why}): another field has focus`); return; }
         // A fullscreen pager owns the keyboard (j/k, q…); the composer under it must not grab focus.
-        if (document.querySelector(".pager-overlay")) return;
+        if (document.querySelector(".pager-overlay")) { focusLog(`skip (${why}): pager open`); return; }
+        // The window is back but the webview itself has no keyboard focus (Windows/WebView2
+        // after an un-minimize or maximize): ask the host for it. Its `focus` event brings
+        // us back here with document.hasFocus() true.
+        if (!document.hasFocus()) {
+          focusLog(`page lacks focus (${why}) → ${requestPageFocus() ? "asked host" : "not asking (no host / asked <500ms ago)"}`);
+          return;
+        }
         focusComposer(focusedSidRef.current);
+        focusLog(`focused composer (${why}) session=${focusedSidRef.current}`);
       });
     };
+    const onBlur = () => focusLog("event blur");
+    // Every DOM focus move, to see what takes focus away from the command input.
+    const onFocusOut = (e: FocusEvent) =>
+      focusLog(`focusout ${describeEl(e.target as Element)} → ${describeEl(e.relatedTarget as Element | null)}`);
+    document.addEventListener("focusout", onFocusOut);
     window.addEventListener("focus", onReturn);
+    window.addEventListener("blur", onBlur);
     window.addEventListener("daimon:host-focus", onReturn); // sent by the native host on window activation
+    window.addEventListener("daimon:window-state", onReturn); // (un)maximized
     document.addEventListener("visibilitychange", onReturn);
     return () => {
       window.removeEventListener("focus", onReturn);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("focusout", onFocusOut);
       window.removeEventListener("daimon:host-focus", onReturn);
+      window.removeEventListener("daimon:window-state", onReturn);
       document.removeEventListener("visibilitychange", onReturn);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -961,6 +985,7 @@ function Daimon() {
     const pane = sessions.find((s) => s.id === paneSessionId) ?? sessions[0]!;
     const paneDisabled = pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input));
     const panePrompting = paneDisabled && pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input) && isPromptingForInput(b));
+    const paneSecret = paneDisabled && pane.blocks.some((b) => b.pending && !STREAMING_INTERACTIVE_RE.test(b.input) && isPromptingForSecret(b));
     const paneHideBar = (altScreenActive && paneSessionId === activeId) || tuiBlockIds.has(paneSessionId) || !!pagerPanes[paneSessionId] || !!pagerPanes[""];
     return (
       <>
@@ -1036,6 +1061,7 @@ function Daimon() {
                 disabled={paneDisabled}
                 streamingActive={pane.blocks.some((b) => b.pending && STREAMING_INTERACTIVE_RE.test(b.input))}
                 promptingForInput={panePrompting}
+                secretInput={paneSecret}
               />
             </div>
           </div>

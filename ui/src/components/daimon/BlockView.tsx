@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, useContext, createContext, useMemo, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { createPortal } from "react-dom";
-import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon, CircleDotIcon, CloudIcon, CloudOffIcon, ArrowUpIcon, ArrowDownIcon, CheckIcon } from "lucide-react";
+import { LoaderCircleIcon, XCircleIcon, ChevronDownIcon, GitBranchIcon, ChevronRightIcon, PlusIcon, ChevronUpIcon, XIcon, CircleDotIcon, CloudIcon, CloudOffIcon, ArrowUpIcon, ArrowDownIcon, CheckIcon, TagIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Keys } from "./Kbd";
 import { MarkdownDiffView, MarkdownModeToggle } from "./MarkdownDiffView";
@@ -9,7 +9,7 @@ import { isMarkdownPath, useMarkdownRendered, toggleMarkdownRendered } from "@/l
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
-import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode } from "@/lib/daimon/shell";
+import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode, GitLogRef } from "@/lib/daimon/shell";
 import { Wraith } from "wraithterm";
 import hljs from "highlight.js/lib/core";
 import hljsBash from "highlight.js/lib/languages/bash";
@@ -762,6 +762,46 @@ function FullscreenPager({
   );
 }
 
+/**
+ * Branch/tag chips on a `git log` row. The checked-out branch is highlighted; a branch whose
+ * remote copy sits on the same commit gets a cloud mark (it's pushed); a remote branch on its
+ * own (faded) shows where the remote is when the local branch has moved on.
+ */
+function LogRefs({ refs, isHead, search }: { refs?: GitLogRef[] | undefined; isHead?: boolean | undefined; search: string }) {
+  const list = refs ?? [];
+  // Detached HEAD (no branch checked out) still needs a "you are here" marker.
+  const detached = isHead && !list.some((r) => r.current);
+  if (!list.length && !detached) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1 font-mono text-[11px] leading-none">
+      {detached && (
+        <span className="rounded border border-signal/50 bg-signal/10 px-1.5 py-0.5 text-signal" title="HEAD — checked out directly, not on a branch">detached</span>
+      )}
+      {list.map((r) => {
+        const title =
+          r.kind === "tag" ? `tag ${r.name}` :
+          r.kind === "remote" ? `${r.name} — where the remote's branch is (as of your last fetch)` :
+          [r.current ? `${r.name} — your current branch` : `branch ${r.name}`,
+           r.synced.length ? `pushed: same commit as ${r.synced.join(", ")}` : null,
+           r.trunk ? "trunk (the repo's default branch)" : null].filter(Boolean).join("\n");
+        const cls =
+          r.current ? "border-signal/50 bg-signal/10 text-signal" :
+          r.kind === "local" ? "border-emerald-400/30 bg-emerald-400/[0.07] text-emerald-300/90" :
+          r.kind === "remote" ? "border-dashed border-muted-foreground/30 text-muted-foreground/60" :
+          "border-amber-400/30 bg-amber-400/[0.07] text-amber-300/90";
+        return (
+          <span key={`${r.kind}:${r.name}`} className={`flex items-center gap-1 rounded border px-1.5 py-0.5 ${cls}`} title={title}>
+            {r.kind === "tag" ? <TagIcon className="size-2.5" /> : r.kind === "remote" ? <CloudIcon className="size-2.5" /> : r.current ? <span className="size-1.5 rounded-full bg-current" /> : null}
+            {highlight(r.name, search)}
+            {r.synced.length > 0 && <CloudIcon className="size-2.5 opacity-60" />}
+            {r.trunk && <span className="opacity-50">trunk</span>}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<Out, { kind: "gitlog" }> & { isLast?: boolean }) {
   const entries = Array.isArray(rawEntries) ? rawEntries : [];
   const [commitIdx, setCommitIdx] = useState(0);
@@ -866,6 +906,7 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
           ? entries.filter((e) =>
               e.subject.toLowerCase().includes(lq) ||
               e.author.toLowerCase().includes(lq) ||
+              (e.refs ?? []).some((r) => r.name.toLowerCase().includes(lq)) ||
               e.hash.startsWith(search) || e.fullHash.startsWith(search) ||
               expanded.has(e.hash) ||
               (filePathsRef.current[e.hash] ?? []).some((p) => p.toLowerCase().includes(lq))
@@ -886,7 +927,8 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
                   >
                     <ChevronRightIcon className={`size-3 shrink-0 text-muted-foreground/40 transition-transform ${open ? "rotate-90" : ""}`} />
                     <span className="w-14 shrink-0 font-mono text-[13px] text-muted-foreground/70 tabular-nums" title={e.fullHash}>{e.hash}</span>
-                    {e.isHead && <span className="shrink-0 rounded border border-signal/50 bg-signal/10 px-1 py-0.5 font-mono text-[9px] text-signal leading-none">HEAD</span>}
+                    <span className={`size-1.5 shrink-0 rounded-full ${e.unpushed ? "bg-amber-400/80" : "bg-transparent"}`} title={e.unpushed ? `not pushed — ${e.unpushedTo ?? "the remote"} doesn't have this commit yet` : undefined} />
+                    <LogRefs refs={e.refs} isHead={e.isHead} search={search} />
                     <span className="flex-1 truncate font-mono text-[13px] text-foreground">{highlight(e.subject, search)}</span>
                     <span className="shrink-0 font-mono text-[11px] text-muted-foreground/50">{highlight(e.author, search)}</span>
                   </button>
@@ -2591,36 +2633,6 @@ function OutView({ out: rawOut, input = "", ctx = "", cwd, isLast = false, onSea
   return null;
 }
 
-function StdinRow({ sessionId }: { sessionId: string }) {
-  const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => { ref.current?.focus(); }, []);
-  return (
-    <div className="mt-2 flex items-center gap-1.5 font-mono text-[13px]">
-      <span className="text-amber-400/80">›</span>
-      <input
-        ref={ref}
-        autoFocus
-        spellCheck={false}
-        autoComplete="off"
-        className="flex-1 bg-transparent text-foreground outline-none [caret-color:var(--color-foreground)] placeholder:text-muted-foreground/40"
-        onKeyDown={(e) => {
-          if (e.ctrlKey && e.key === "c") {
-            e.preventDefault();
-            sendRaw(sessionId, "\x03");
-            (e.target as HTMLInputElement).value = "";
-            return;
-          }
-          if (e.key === "Enter") {
-            e.preventDefault();
-            sendRaw(sessionId, (e.target as HTMLInputElement).value + "\n");
-            (e.target as HTMLInputElement).value = "";
-          }
-        }}
-      />
-    </div>
-  );
-}
-
 /** Collapsed output clamp; output taller than this is "long" and becomes collapsible. */
 const COLLAPSED_MAX_PX = 320;
 
@@ -2849,9 +2861,6 @@ export function BlockView({ block, modeActive = false, onRerun, isLast, currentC
             </div>
           )}
         </div>
-      )}
-      {block.pending && isLast && !isTuiActive && !STREAMING_INTERACTIVE_RE.test(block.input) && promptingForInput && (
-        <StdinRow sessionId={sessionId} />
       )}
     </article>
   );

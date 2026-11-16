@@ -26,6 +26,9 @@ export type GitBranchNode = {
   date: string; subject: string;
 };
 
+/** A branch/tag pointing at a commit in `git log` (see `parse_decorations` in the daemon). */
+export type GitLogRef = { name: string; kind: "local" | "remote" | "tag"; current: boolean; trunk: boolean; synced: string[] };
+
 export type Out =
   | { kind: "lines"; lines: string[]; tone?: "normal" | "muted" | "bad" | "good" }
   | { kind: "ansi"; html: string }
@@ -34,7 +37,7 @@ export type Out =
   | { kind: "lslong"; entries: LsEntry[]; total: string }
   | { kind: "table"; head: string[]; rows: string[][]; accentCol?: number }
   | { kind: "pairs"; pairs: [string, string][] }
-  | { kind: "gitlog"; entries: { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean }[]; cwd: string }
+  | { kind: "gitlog"; entries: { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean; unpushed?: boolean; unpushedTo?: string; refs?: GitLogRef[] }[]; cwd: string }
   | { kind: "gitbranches"; branches: string[]; current: string; trunk?: string | null; nodes?: GitBranchNode[] }
   | { kind: "gitstatus"; branch: string; upstream?: string | null; ahead: number; behind: number; staged: GitStatusFile[]; unstaged: GitStatusFile[]; untracked: string[]; added?: number; removed?: number }
   | { kind: "gitdiff"; raw: string }
@@ -1027,6 +1030,65 @@ export function resizePty(tabId: string, cols: number, rows: number) {
   shell.resize(tabId, cols, rows).catch(() => {});
 }
 
+/**
+ * Split a command line the way a shell would for plain words and quotes. Returns null if it
+ * needs a real shell (pipes, redirects, `;`/`&&`, `$VAR`, `$(…)`, backticks, globs), so the
+ * caller can leave the command to the terminal.
+ */
+export function splitPlainArgs(line: string): string[] | null {
+  const out: string[] = [];
+  let cur = "", has = false, quote: "'" | '"' | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote === "'") { if (c === "'") quote = null; else cur += c; continue; }
+    if (quote === '"') {
+      if (c === '"') quote = null;
+      else if (c === "\\" && i + 1 < line.length && '"\\$`'.includes(line[i + 1]!)) cur += line[++i];
+      else if (c === "$" || c === "`") return null;
+      else cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; has = true; continue; }
+    if (c === "\\") { if (i + 1 < line.length) { cur += line[++i]; has = true; } continue; }
+    if (/\s/.test(c)) { if (has) { out.push(cur); cur = ""; has = false; } continue; }
+    if ("|;&<>`$*?[()".includes(c)) return null;
+    if ((c === "~" || c === "#") && !has) return null; // home dir / comment at word start
+    if (c === "{" && /^\{[^}\s]*,/.test(line.slice(i))) return null; // brace expansion; `@{u}` is literal
+    cur += c; has = true;
+  }
+  if (quote) return null;
+  if (has) out.push(cur);
+  return out;
+}
+
+/** `git log` flags that change what's printed — the rich view can't show those, the terminal can. */
+const GIT_LOG_RAW_ONLY = /^(-p|-u|-s|-z|-h|-L.*|-W|--patch.*|--stat.*|--numstat|--shortstat|--dirstat.*|--compact-summary|--name-only|--name-status|--raw|--summary|--graph|--oneline|--pretty.*|--format.*|--output.*|--help|--cc|--word-diff.*|--check|--function-context|--show-signature|--log-size|--line-prefix.*|--notes.*|--show-notes.*)$/;
+
+/** Bundled short flags like `-ps` or `-in5`: raw-only if a flag before any value-taking one (n/S/G/L) is p/u/s/z/h. */
+function bundlesRawFlag(a: string): boolean {
+  const m = /^-([a-zA-Z]{2,})/.exec(a);
+  if (!m) return false;
+  for (const f of m[1]!) {
+    if ("nSGL".includes(f)) return f === "L";
+    if ("puszhW".includes(f)) return true;
+  }
+  return false;
+}
+
+/** Extra args for the rich `git log` view, or null when the terminal should run it as typed. */
+export function gitLogArgs(input: string): string[] | null {
+  const words = splitPlainArgs(input);
+  if (!words || words[0] !== "git") return null;
+  let i = 1;
+  if (words[i] === "--no-pager") i++;
+  if (words[i] !== "log") return null;
+  const args = words.slice(i + 1);
+  const dashdash = args.indexOf("--");
+  const opts = dashdash === -1 ? args : args.slice(0, dashdash);
+  if (opts.some((a) => GIT_LOG_RAW_ONLY.test(a) || bundlesRawFlag(a))) return null;
+  return args;
+}
+
 export async function run(
   raw: string,
   state: State,
@@ -1060,12 +1122,17 @@ export async function run(
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
-  if (!resume && /^git\s+log(\s|$)/.test(input)) {
+  const logArgs = resume ? null : gitLogArgs(input);
+  if (logArgs) {
     const t = Date.now();
     const id = Math.random().toString(36).slice(2);
     try {
-      const entries = await shell.listLog(cwdStr, 2000);
-      const out: Out[] = [{ kind: "gitlog", entries, cwd: cwdStr }];
+      const res = await shell.listLog(cwdStr, 2000, logArgs);
+      if (!Array.isArray(res)) {
+        const msg = res.error || "git log failed";
+        return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 128, out: [{ kind: "lines", lines: msg.split("\n"), tone: "bad" }] }, next: state };
+      }
+      const out: Out[] = [{ kind: "gitlog", entries: res, cwd: cwdStr }];
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 0, out }, next: state };
     } catch {
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ts: Date.now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };

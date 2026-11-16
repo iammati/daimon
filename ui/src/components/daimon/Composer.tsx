@@ -29,6 +29,7 @@ export function Composer({
   disabled = false,
   streamingActive: _streamingActive = false,
   promptingForInput = false,
+  secretInput = false,
 }: {
   cwd: string[];
   ctx: string;
@@ -45,6 +46,8 @@ export function Composer({
   disabled?: boolean;
   streamingActive?: boolean;
   promptingForInput?: boolean;
+  /** The running command is asking for a password/passphrase — mask what's typed. */
+  secretInput?: boolean;
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeItemRef = useRef<HTMLLIElement>(null);
@@ -86,7 +89,8 @@ export function Composer({
     if (!justAccepted.current) dismissed.current = false;
     justAccepted.current = false;
     if (completeDebounce.current) clearTimeout(completeDebounce.current);
-    if (!value.trim()) { completePromise.current = null; return; }
+    // stdin mode: no completions (and never ship a typed password to the completer)
+    if (!value.trim() || disabled) { completePromise.current = null; return; }
     const cwdStr = "/" + cwd.join("/");
     const p = completeNative(value, cwdStr, history, historyTs);
     completePromise.current = p;
@@ -95,7 +99,7 @@ export function Composer({
       if (completePromise.current === p) { setItems(result.items); setToken(result.token); }
     }, 60);
     return () => { if (completeDebounce.current) clearTimeout(completeDebounce.current); };
-  }, [value, cwd, history]);
+  }, [value, cwd, history, disabled]);
 
   useEffect(() => {
     activeItemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -231,6 +235,12 @@ export function Composer({
         e.preventDefault();
         onSubmit("\x03");
         setInputValue("");
+        return;
+      }
+      // Ctrl+D on an empty line = EOF (cat, python REPL, `read` loops)
+      if (e.ctrlKey && e.key === "d" && !(inputRef.current?.value ?? "")) {
+        e.preventDefault();
+        onSubmit("\x04");
         return;
       }
       if (e.key === "Enter" && !e.shiftKey) {
@@ -373,10 +383,7 @@ export function Composer({
         }
         <span className="font-mono text-[13px] text-signal pt-0.5 shrink-0 select-none">›</span>
         <div className="relative flex-1 min-w-0">
-          {disabled && !promptingForInput
-            ? <span className="font-mono text-[13px] text-muted-foreground/40 pt-0.5 select-none animate-pulse">running…</span>
-            : (<>
-          {ghost && (
+          {ghost && !disabled && (
             <div className="pointer-events-none absolute top-0 left-0 right-0 font-mono text-[14px] leading-6 whitespace-pre-wrap break-words">
               <span className="invisible">{value}</span>
               <span className="text-muted-foreground/45">{ghost}</span>
@@ -390,19 +397,13 @@ export function Composer({
             onChange={(e) => {
               valueRef.current = e.target.value;
               setValue(e.target.value);
-              onDraftChange?.(e.target.value);
+              // stdin text (possibly a password) is never kept as a session draft
+              if (!disabled) onDraftChange?.(e.target.value);
               setHistIndex(null);
               histNavPrefix.current = null;
               autoResize();
             }}
             onKeyDown={onKeyDown}
-            onPaste={(e) => {
-              if (disabled) {
-                e.preventDefault();
-                const text = e.clipboardData.getData("text");
-                onSubmit("\x1b[200~" + text + "\x1b[201~");
-              }
-            }}
             onBlur={() => setOpen(false)}
             disabled={interactive}
             spellCheck={false}
@@ -410,11 +411,15 @@ export function Composer({
             autoCorrect="off"
             autoCapitalize="off"
             aria-label={`Command in ${ctx}`}
-            placeholder="Run a command"
-            className="relative w-full resize-none overflow-hidden bg-transparent font-mono text-[14px] leading-6 text-foreground [caret-color:var(--color-foreground)] outline-none placeholder:text-muted-foreground/40"
+            placeholder={
+              !disabled ? "Run a command"
+              : secretInput ? "password (hidden), Enter to send"
+              : promptingForInput ? "answer, Enter to send"
+              : "running… type to send input, Ctrl+C to interrupt"
+            }
+            className={`relative w-full resize-none overflow-hidden bg-transparent font-mono text-[14px] leading-6 text-foreground [caret-color:var(--color-foreground)] outline-none placeholder:text-muted-foreground/40 ${secretInput ? "[-webkit-text-security:disc]" : ""}`}
             style={{ height: "1.5rem" }}
           />
-          </>)}
         </div>
       </div>
     </div>

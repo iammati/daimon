@@ -191,26 +191,108 @@ pub fn git_file_content(blob: &str, file_path: &str, cwd: &str) -> Value {
     }
 }
 
-pub fn git_log(cwd: &str, limit: usize) -> Value {
+/// `git log` rows for the UI. `args` are the user's own (revisions, `--all`, `--author=…`,
+/// `-n 5`, `-- paths`); they come after our defaults so their `-n` wins, and the UI never
+/// forwards output-shaping flags (`--oneline`, `-p`, `--graph`, …) that would break parsing.
+pub fn git_log(cwd: &str, limit: usize, args: &[String]) -> Value {
     let limit_str = limit.to_string();
-    let fmt = "%H|%h|%aI|%s|%an|%D";
-    match run("git", &["--no-pager", "log", &format!("-{}", limit_str), &format!("--format={}", fmt)], Some(cwd)) {
-        Err(e) => json!({ "error": e }),
-        Ok(raw) => {
-            let entries: Vec<Value> = raw.lines().enumerate().map(|(i, line)| {
-                let parts: Vec<&str> = line.splitn(6, '|').collect();
-                json!({
-                    "hash": parts.get(1).unwrap_or(&""),
-                    "fullHash": parts.get(0).unwrap_or(&""),
-                    "date": parts.get(2).unwrap_or(&""),
-                    "subject": parts.get(3).unwrap_or(&""),
-                    "author": parts.get(4).unwrap_or(&""),
-                    "isHead": i == 0,
-                })
-            }).collect();
-            json!(entries)
+    // %x1f (unit separator) never appears in commit text, unlike `|`.
+    let fmt = format!("--format={}", "%H%x1f%h%x1f%aI%x1f%s%x1f%an%x1f%D");
+    let limit_flag = format!("-{}", limit_str);
+    let mut git_args: Vec<&str> = vec!["--no-pager", "log", &limit_flag, &fmt];
+    git_args.extend(args.iter().map(String::as_str));
+    let raw = match run("git", &git_args, Some(cwd)) {
+        Err(e) => return json!({ "error": e }),
+        Ok(raw) => raw,
+    };
+
+    let remotes: Vec<String> = run("git", &["remote"], Some(cwd))
+        .map(|r| r.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default();
+    let locals: std::collections::HashSet<String> = run("git", &["for-each-ref", "--format=%(refname:short)", "refs/heads"], Some(cwd))
+        .map(|r| r.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    // Trunk: what origin/HEAD points to (e.g. "origin/main"), else a conventional local name.
+    let trunk_remote: Option<String> = run("git", &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], Some(cwd))
+        .ok().map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    let trunk: Option<String> = trunk_remote.as_ref().and_then(|r| r.split_once('/').map(|(_, b)| b.to_string()))
+        .or_else(|| ["main", "master", "trunk", "develop"].iter().find(|b| locals.contains(**b)).map(|b| b.to_string()));
+    // Commits on HEAD that aren't pushed: compared against the branch's upstream (so `main`
+    // ahead of `origin/main` counts even if another remote branch has them); with no upstream,
+    // against every remote-tracking branch.
+    let upstream: Option<String> = run("git", &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], Some(cwd))
+        .ok().map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+    let unpushed: std::collections::HashSet<String> = match &upstream {
+        Some(_) => run("git", &["rev-list", "-n", &limit_str, "@{u}..HEAD"], Some(cwd)),
+        None if !remotes.is_empty() => run("git", &["rev-list", "-n", &limit_str, "HEAD", "--not", "--remotes"], Some(cwd)),
+        None => Ok(String::new()),
+    }.map(|r| r.lines().map(|l| l.to_string()).collect()).unwrap_or_default();
+    let unpushed_to = upstream.unwrap_or_else(|| "any remote".to_string());
+
+    let entries: Vec<Value> = raw.lines().map(|line| {
+        let parts: Vec<&str> = line.splitn(6, '\x1f').collect();
+        let full = parts.first().copied().unwrap_or("");
+        let (is_head, refs) = parse_decorations(parts.get(5).copied().unwrap_or(""), &remotes, &locals, trunk.as_deref());
+        json!({
+            "hash": parts.get(1).unwrap_or(&""),
+            "fullHash": full,
+            "date": parts.get(2).unwrap_or(&""),
+            "subject": parts.get(3).unwrap_or(&""),
+            "author": parts.get(4).unwrap_or(&""),
+            "isHead": is_head,
+            "unpushed": unpushed.contains(full),
+            "unpushedTo": unpushed_to,
+            "refs": refs,
+        })
+    }).collect();
+    json!(entries)
+}
+
+/// Turn a `%D` decoration list (`HEAD -> main, origin/main, tag: v1, origin/HEAD`) into
+/// chips for the UI. A remote branch at the same commit as its local namesake is folded
+/// into the local chip (`synced`); `<remote>/HEAD` is dropped (the trunk gets a flag instead).
+fn parse_decorations(
+    deco: &str,
+    remotes: &[String],
+    locals: &std::collections::HashSet<String>,
+    trunk: Option<&str>,
+) -> (bool, Vec<Value>) {
+    let mut is_head = false;
+    let mut current: Option<&str> = None;
+    let mut tags: Vec<&str> = Vec::new();
+    let mut local: Vec<&str> = Vec::new();
+    let mut remote: Vec<(&str, &str)> = Vec::new(); // (remote, branch)
+    for item in deco.split(", ").map(str::trim).filter(|s| !s.is_empty()) {
+        if item == "HEAD" { is_head = true; continue; }
+        if let Some(b) = item.strip_prefix("HEAD -> ") { is_head = true; current = Some(b); local.push(b); continue; }
+        if let Some(t) = item.strip_prefix("tag: ") { tags.push(t); continue; }
+        match remotes.iter().find_map(|r| item.strip_prefix(r.as_str()).and_then(|b| b.strip_prefix('/')).map(|b| (r.as_str(), b))) {
+            Some((_, "HEAD")) => {}
+            Some(rb) => remote.push(rb),
+            None => local.push(item),
         }
     }
+
+    let mut refs = Vec::new();
+    for b in &local {
+        let synced_with: Vec<String> = remote.iter().filter(|(_, rb)| rb == b).map(|(r, rb)| format!("{r}/{rb}")).collect();
+        refs.push(json!({
+            "name": b, "kind": "local",
+            "current": current == Some(*b),
+            "trunk": trunk == Some(*b),
+            "synced": synced_with,
+        }));
+    }
+    for (r, b) in &remote {
+        if local.contains(b) { continue; }
+        // Only flag the remote copy as trunk when there is no local trunk branch to carry it.
+        let is_trunk = trunk == Some(*b) && !locals.contains(*b);
+        refs.push(json!({ "name": format!("{r}/{b}"), "kind": "remote", "current": false, "trunk": is_trunk, "synced": [] }));
+    }
+    for t in &tags {
+        refs.push(json!({ "name": t, "kind": "tag", "current": false, "trunk": false, "synced": [] }));
+    }
+    (is_head, refs)
 }
 
 /// Above this many local branches, only compare each branch against the trunk
@@ -443,5 +525,43 @@ pub fn git_diff(args: &[String], cwd: &str) -> Value {
     match run("git", &git_args, Some(cwd)) {
         Err(e) => json!({ "error": e }),
         Ok(raw) => json!({ "raw": raw }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn locals(names: &[&str]) -> std::collections::HashSet<String> { names.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn decorations_fold_synced_remotes_and_drop_origin_head() {
+        let remotes = vec!["origin".to_string()];
+        let l = locals(&["main", "wraithterm"]);
+        let (head, refs) = parse_decorations("HEAD -> main, origin/wraithterm, wraithterm", &remotes, &l, Some("main"));
+        assert!(head);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["name"], "main");
+        assert_eq!(refs[0]["current"], true);
+        assert_eq!(refs[0]["trunk"], true);
+        assert_eq!(refs[1]["name"], "wraithterm");
+        assert_eq!(refs[1]["synced"], json!(["origin/wraithterm"]));
+
+        let (head, refs) = parse_decorations("origin/main, origin/HEAD, tag: v1.0", &remotes, &l, Some("main"));
+        assert!(!head);
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["name"], "origin/main");
+        assert_eq!(refs[0]["kind"], "remote");
+        assert_eq!(refs[0]["trunk"], false); // local main exists and carries the trunk flag
+        assert_eq!(refs[1]["kind"], "tag");
+    }
+
+    #[test]
+    fn decorations_keep_slashed_local_branches_local() {
+        let remotes = vec!["origin".to_string()];
+        let (head, refs) = parse_decorations("HEAD, feature/x", &remotes, &locals(&["feature/x"]), None);
+        assert!(head);
+        assert_eq!(refs[0]["kind"], "local");
+        assert_eq!(refs[0]["current"], false);
     }
 }

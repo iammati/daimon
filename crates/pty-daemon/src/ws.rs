@@ -120,10 +120,10 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
                                 let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
                             });
                         }
-                        Ok(SessionCommand::GitLog { req_id, cwd, limit }) => {
+                        Ok(SessionCommand::GitLog { req_id, cwd, limit, args }) => {
                             let tx = client_tx.clone();
                             tokio::task::spawn_blocking(move || {
-                                let data = crate::commands::git_log(&cwd, limit);
+                                let data = crate::commands::git_log(&cwd, limit, &args);
                                 let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
                             });
                         }

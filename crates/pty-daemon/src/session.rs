@@ -50,8 +50,8 @@ pub enum SessionCommand {
     Close { tab_id: String },
     /// Run `git --no-pager status --porcelain=v1 -b` in cwd.
     GitStatus { req_id: String, cwd: String },
-    /// Run `git --no-pager log` in cwd.
-    GitLog { req_id: String, cwd: String, limit: usize },
+    /// Run `git --no-pager log` in cwd, with the user's extra args (revisions, filters, paths).
+    GitLog { req_id: String, cwd: String, limit: usize, #[serde(default)] args: Vec<String> },
     /// Run `git --no-pager branch` in cwd.
     GitBranch { req_id: String, cwd: String },
     /// Run `git --no-pager diff` with optional extra args in cwd.
@@ -293,6 +293,18 @@ impl Session {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("FORCE_COLOR", "1");
         cmd.env("CLICOLOR_FORCE", "1");
+        // Don't leak a parent agent's non-interactive overrides into the user's shell: e.g. a
+        // daemon started from Claude Code inherits GIT_EDITOR=true, so `git commit` would
+        // "edit" with `true` and abort on an empty message instead of opening an editor.
+        for (k, _) in std::env::vars_os() {
+            let k = k.to_string_lossy();
+            if k == "CLAUDECODE" || k.starts_with("CLAUDE_CODE_") {
+                cmd.env_remove(k.as_ref());
+            }
+        }
+        if std::env::var_os("CLAUDECODE").is_some() {
+            cmd.env_remove("GIT_EDITOR");
+        }
         // Point ZDOTDIR at our integration dir which sources ~/.zshrc + adds OSC 133 hooks
         let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent().unwrap().parent().unwrap()
