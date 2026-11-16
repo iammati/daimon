@@ -53,6 +53,25 @@ export const PagerContainerContext = createContext<HTMLElement | null>(null);
 //     boundary (start or after `_`) — so SECRET_VALUE, TOKEN_FILE, KEY_PREFIX match but MONKEY
 //     and TURKEY do not. Over-redaction in presentation mode is safe; silly false positives aren't.
 //  3. Lowercase `password:`/`token=` etc. in free text.
+/**
+ * Pin a `position: fixed` element exactly over a viewport rect.
+ * An ancestor with backdrop-filter / transform (the glass <main>) becomes the
+ * containing block for fixed descendants, so viewport coordinates land shifted
+ * by that ancestor's offset (the sidebar width). Measure where the element
+ * actually ended up and compensate.
+ */
+function placeFixedOver(el: HTMLElement, rect: DOMRect) {
+  el.style.left = rect.left + 'px';
+  el.style.top = rect.top + 'px';
+  el.style.width = rect.width + 'px';
+  el.style.height = rect.height + 'px';
+  const actual = el.getBoundingClientRect();
+  const dx = actual.left - rect.left;
+  const dy = actual.top - rect.top;
+  if (dx) el.style.left = rect.left - dx + 'px';
+  if (dy) el.style.top = rect.top - dy + 'px';
+}
+
 const SECRET_RE = new RegExp(
   "(?:ghp_|gho_|ghs_|github_pat_|xox[baprs]-|sk-[a-zA-Z0-9]{16,}|pk-live_|pk-test_|AKIA|ASIA|glpat-)[A-Za-z0-9_\\-]{8,}" +
   "|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}" +
@@ -2520,10 +2539,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
       const pane = tuiPaneRef.current ?? el.closest('[data-pane]') as HTMLElement ?? null;
       if (pane) {
         const rect = pane.getBoundingClientRect();
-        el.style.left = rect.left + 'px';
-        el.style.top = rect.top + 'px';
-        el.style.width = rect.width + 'px';
-        el.style.height = rect.height + 'px';
+        placeFixedOver(el, rect);
       } else {
         el.style.left = '';
         el.style.top = '';
@@ -2599,10 +2615,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     if (altScreen) {
       const rect = getPaneRect();
       if (rect) {
-        el.style.left = rect.left + 'px';
-        el.style.top = rect.top + 'px';
-        el.style.width = rect.width + 'px';
-        el.style.height = rect.height + 'px';
+        placeFixedOver(el, rect);
       }
     }
     const updateHeight = () => {
@@ -2633,10 +2646,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
         if (altScreen) {
           const rect = getPaneRect();
           if (rect) {
-            el.style.left = rect.left + 'px';
-            el.style.top = rect.top + 'px';
-            el.style.width = rect.width + 'px';
-            el.style.height = rect.height + 'px';
+            placeFixedOver(el, rect);
           }
         }
         updateHeight();
