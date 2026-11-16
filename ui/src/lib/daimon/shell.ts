@@ -75,7 +75,7 @@ const INTERACTIVE_RE = /^\s*(scp|ipmitool|ipmi|kubectl\s+(exec|attach|debug)|oc\
 // erase-display (\x1b[2J / \x1b[3J), enable mouse tracking (\x1b[?1000h).
 // Not erase-line (\x1b[2K): on its own that's a one-line progress redraw (vite, npm),
 // which normalizeTerminal replays in the block.
-const TUI_RE = /\x1b\[\d*A|\x1b\[\?25[lh]|\x1b\[\d*;\d*H|\x1b\[H\b|\x1b\[2J|\x1b\[3J|\x1b\[\?1000h|\x1b\[\?1049[lh]/;
+const TUI_RE = /\x1b\[\d*A|\x1b\[\d*;\d*H|\x1b\[H\b|\x1b\[2J|\x1b\[3J|\x1b\[\?1000h|\x1b\[\?1049[lh]/;
 
 // Per-tab alt-screen state — driven by daemon altScreenEnter/Exit events.
 const inAltScreenMap = new Map<string, boolean>();
@@ -152,8 +152,8 @@ const ANSI = (s: string) =>
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
 
 // Standard ANSI 256-color palette
-const ANSI16 = ["#000","#c0392b","#27ae60","#e6a817","#3498db","#8e44ad","#16a085","#bdc3c7",
-                 "#7f8c8d","#e74c3c","#2ecc71","#f1c40f","#5dade2","#a569bd","#1abc9c","#ecf0f1"];
+const ANSI16 = ["#000","#ff3b30","#27ae60","#e6a817","#3498db","#8e44ad","#16a085","#bdc3c7",
+                 "#7f8c8d","#ff453a","#2ecc71","#f1c40f","#5dade2","#a569bd","#1abc9c","#ecf0f1"];
 
 // Build full xterm 256-color palette
 const ANSI256: string[] = [...ANSI16];

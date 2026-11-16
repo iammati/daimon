@@ -5,7 +5,7 @@ import {
   type BackdropKind,
 } from "./winBackdrop";
 import { enablePinchZoom } from "./macMagnification";
-import { enableMovableByBackground } from "./macWindowDrag";
+import { setupNativeDrag } from "./macWindowDrag";
 import { focusWebview } from "./winFocus";
 import { prepareCustomFrame, startTopResize } from "./winFrame";
 import { setWindowIcon } from "./winIcon";
@@ -100,7 +100,7 @@ if (isWindows && !setWindowIcon(win.ptr, resolve(import.meta.dir, "../icon.ico")
 }
 
 enablePinchZoom(); // macOS only
-enableMovableByBackground(); // macOS only — native drag via movableByWindowBackground
+setupNativeDrag(win); // macOS only — native drag via performWindowDragWithEvent
 
 // Window re-activated (un-minimize, alt-tab / click back from another app): give the
 // page keyboard focus and tell it, so the command input is focused right away. The

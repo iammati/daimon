@@ -253,7 +253,9 @@ pub fn git_branch(cwd: &str) -> Value {
             if ahead == 0 && behind > 0 && !is_trunk { continue; }
             // Same tip: only the trunk or an alphabetically earlier branch may parent it (no 2-cycles).
             if ahead == 0 && behind == 0 && !is_trunk && p.as_str() > b.as_str() { continue; }
-            let key = (ahead, !is_trunk, behind, p.clone());
+            // Same-tip (0,0): prefer a non-trunk sibling (closer relative) over trunk.
+            let prefers_trunk = !(ahead == 0 && behind == 0 && !is_trunk);
+            let key = (ahead, prefers_trunk, behind, p.clone());
             if best.as_ref().map_or(true, |(k, _)| key < *k) {
                 best = Some((key, (p.clone(), ahead, behind)));
             }

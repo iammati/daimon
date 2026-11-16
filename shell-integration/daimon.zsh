@@ -7,6 +7,9 @@ DAIMON_BIN="${DAIMON_BIN:-daimon}"
 # Load user opt-in modules (written by `daimon setup`)
 [[ -f "$HOME/.config/daimon/config.zsh" ]] && source "$HOME/.config/daimon/config.zsh"
 
+# Force color in pipes — grep --color=auto suppresses color when stdout is not a TTY
+alias grep='grep --color=always'
+
 _daimon_precmd() {
   local code=$?
   DAIMON_EXIT_CODE=$code "$DAIMON_BIN" precmd

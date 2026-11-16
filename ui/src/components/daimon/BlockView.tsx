@@ -57,12 +57,14 @@ const SECRET_RE = new RegExp(
   "(?:ghp_|gho_|ghs_|github_pat_|xox[baprs]-|sk-[a-zA-Z0-9]{16,}|pk-live_|pk-test_|AKIA|ASIA|glpat-)[A-Za-z0-9_\\-]{8,}" +
   "|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}" +
   "|-----BEGIN[A-Z ]+PRIVATE KEY-----[\\s\\S]*?-----END[A-Z ]+PRIVATE KEY-----" +
-  "|\\b(?:[A-Za-z0-9]+_)*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|AUTH|APIKEY|PRIVATE)(?:_[A-Za-z0-9]+)*\\s*[=:]\\s*\\S+" +
-  "|\\b(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key|access[_-]?key|private[_-]?key|credential)\\w*\\s*[=:]\\s*\\S+",
+  "|(\\b(?:[A-Za-z0-9]+_)*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|AUTH|APIKEY|PRIVATE)(?:_[A-Za-z0-9]+)*\\s*[=:]\\s*)\\S+" +
+  "|(\\b(?:password|passwd|secret|token|api[_-]?key|auth[_-]?key|access[_-]?key|private[_-]?key|credential)\\w*\\s*[=:]\\s*)\\S+",
   "gi");
 
 function redact(text: string): string {
-  return text.replace(SECRET_RE, "[redacted by daimon]");
+  return text.replace(SECRET_RE, (_, p1, p2) =>
+    (p1 ?? p2) ? `${p1 ?? p2}[redacted by daimon]` : "[redacted by daimon]"
+  );
 }
 
 // Strip ansi-to-html markup to plain text and decode the entities the converter introduced, so
@@ -80,7 +82,9 @@ function redactNode(text: string): React.ReactNode {
   let key = 0;
   const re = new RegExp(SECRET_RE.source, "gi");
   while ((match = re.exec(text)) !== null) {
+    const prefix = match[1] ?? match[2] ?? "";
     if (match.index > last) parts.push(text.slice(last, match.index));
+    if (prefix) parts.push(prefix);
     parts.push(
       <mark key={key++} className="bg-amber-400/25 text-amber-300 rounded-[3px] px-0.5 not-italic">[redacted by daimon]</mark>
     );
@@ -1030,7 +1034,9 @@ function branchTreeRows(nodes: GitBranchNode[], trunk: string | null | undefined
   const order = (a: GitBranchNode, b: GitBranchNode) =>
     (a.name === trunk ? -1 : b.name === trunk ? 1 : 0) || a.name.localeCompare(b.name);
   const rows: BranchTreeRow[] = [];
+  const MAX_DEPTH = 100;
   const walk = (parent: string | null, depth: number, guides: boolean[]) => {
+    if (depth > MAX_DEPTH) return;
     const list = [...(kids.get(parent) ?? [])].sort(order);
     list.forEach((node, i) => {
       const last = i === list.length - 1;
@@ -1216,9 +1222,12 @@ function GitStatusView({ branch, upstream, ahead, behind, staged, unstaged, untr
   if (!branch) return <div className="font-mono text-[13px] text-muted-foreground/50">not a git repository</div>;
   const clean = staged.length === 0 && unstaged.length === 0 && untracked.length === 0;
   const conflicts = unstaged.filter((f) => f.xy.toUpperCase() === "U");
-  const toItem = (f: GitStatusFile) => {
+  const toItem = (isStaged: boolean) => (f: GitStatusFile) => {
     const info = GIT_XY[f.xy.toUpperCase()] ?? { label: f.xy, cls: "text-muted-foreground" };
-    return { label: info.label, labelCls: info.cls, path: f.path, from: f.from, add: f.add, del: f.del };
+    const labelCls = f.xy.toUpperCase() === "M"
+      ? (isStaged ? "text-emerald-400" : "text-alarm")
+      : info.cls;
+    return { label: info.label, labelCls, path: f.path, from: f.from, add: f.add, del: f.del };
   };
 
   // Sync state, phrased like git but compact.
@@ -1274,13 +1283,13 @@ function GitStatusView({ branch, upstream, ahead, behind, staged, unstaged, untr
       )}
 
       {conflicts.length > 0 && (
-        <GitStatusSection title="Unmerged paths" hint="fix conflicts, then git add <file>" rail="bg-alarm/60" items={conflicts.map(toItem)} onCd={onCd} />
+        <GitStatusSection title="Unmerged paths" hint="fix conflicts, then git add <file>" rail="bg-alarm/60" items={conflicts.map(toItem(false))} onCd={onCd} />
       )}
       {staged.length > 0 && (
-        <GitStatusSection title="Staged" hint="git restore --staged <file> to unstage" rail="bg-signal/60" items={staged.map(toItem)} onCd={onCd} />
+        <GitStatusSection title="Staged" hint="git restore --staged <file> to unstage" rail="bg-signal/60" items={staged.map(toItem(true))} onCd={onCd} />
       )}
       {unstaged.length - conflicts.length > 0 && (
-        <GitStatusSection title="Not staged" hint="git add <file> to stage" rail="bg-amber-400/50" items={unstaged.filter((f) => f.xy.toUpperCase() !== "U").map(toItem)} onCd={onCd} />
+        <GitStatusSection title="Not staged" hint="git add <file> to stage" rail="bg-amber-400/50" items={unstaged.filter((f) => f.xy.toUpperCase() !== "U").map(toItem(false))} onCd={onCd} />
       )}
       {untracked.length > 0 && (
         <GitStatusSection
