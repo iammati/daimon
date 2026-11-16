@@ -19,7 +19,11 @@
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    [self.window performWindowDragWithEvent:event];
+    if (event.clickCount == 2) {
+        [self.window zoom:self];
+    } else {
+        [self.window performWindowDragWithEvent:event];
+    }
 }
 
 @end
