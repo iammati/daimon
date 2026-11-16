@@ -177,8 +177,8 @@ build_windows() {
   win_stop "$out"
   win_stop_builds "$stage"
   trap 'win_stop_builds "'"$stage"'"; exit 130' INT TERM
-  rm -rf "$stage/app/src" "$stage/ui/dist" "$stage/app/build" "$stage/app/artifacts"
-  cp -r "$ROOT/app/src" "$stage/app/src" && cp -r "$ROOT/ui/dist" "$stage/ui/dist" \
+  rm -rf "$stage/app/src" "$stage/app/assets" "$stage/ui/dist" "$stage/app/build" "$stage/app/artifacts"
+  cp -r "$ROOT/app/src" "$stage/app/src" && cp -r "$ROOT/app/assets" "$stage/app/assets" && cp -r "$ROOT/ui/dist" "$stage/ui/dist" \
     && cp "$ROOT/target/release/pty-daemon" "$stage/target/release/" \
     && cp "$ROOT/app/electrobun.config.ts" "$stage/app/" || return 1
   # The Windows app starts its daemon with `wsl.exe -d <this distro>`.

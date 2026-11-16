@@ -8,6 +8,8 @@ import { enablePinchZoom } from "./macMagnification";
 import { enableMovableByBackground } from "./macWindowDrag";
 import { focusWebview } from "./winFocus";
 import { prepareCustomFrame, startTopResize } from "./winFrame";
+import { setWindowIcon } from "./winIcon";
+import { resolve } from "node:path";
 
 // ── pty-daemon ────────────────────────────────────────────────────────────────
 // Dev: dev.sh runs it. Prod: find the running daemon or start one (see daemon.ts).
@@ -92,6 +94,10 @@ const win = new BrowserWindow({
   ...((process.platform === "darwin" || isWindows) && { titleBarStyle: "hiddenInset" as const }),
   ...(process.platform === "darwin" && { trafficLightOffset: { x: 16, y: 14 } }),
 });
+
+if (isWindows && !setWindowIcon(win.ptr, resolve(import.meta.dir, "../icon.ico"))) {
+  console.warn("[main] couldn't set the window icon");
+}
 
 enablePinchZoom(); // macOS only
 enableMovableByBackground(); // macOS only — native drag via movableByWindowBackground

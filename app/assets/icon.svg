@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- daimon app icon: the lucide "terminal" glyph on the dark theme's paper, with the wordmark's amber dot -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#0b0d14"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="4"/>
+  <g transform="translate(212 212) scale(25)" fill="none" stroke="#eef0f6" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="4 17 10 11 4 5"/>
+    <line x1="12" y1="19" x2="17" y2="19"/>
+  </g>
+  <circle cx="712" cy="687" r="34" fill="#f5a524"/>
+</svg>

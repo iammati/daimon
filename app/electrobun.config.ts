@@ -10,6 +10,8 @@ const payload: Record<string, string> = {
   "../target/release/pty-daemon": "pty-daemon",
   // Windows app built from WSL: the distro its (Linux) daemon runs in.
   "wsl-distro": "wsl-distro",
+  // Windows: the window icon, set at runtime (src/bun/winIcon.ts).
+  "assets/icon.ico": "icon.ico",
 };
 const copy = Object.fromEntries(
   Object.entries(payload)
@@ -33,8 +35,9 @@ export default {
     }),
     views: {},
     copy,
-    mac:   { bundleCEF: false },
-    linux: { bundleCEF: false },
-    win:   { bundleCEF: false },
+    // App icon, generated from assets/icon.svg.
+    mac:   { bundleCEF: false, icons: "assets/icon.iconset" },
+    linux: { bundleCEF: false, icon: "assets/icon.png" },
+    win:   { bundleCEF: false, icon: "assets/icon.ico" },
   },
 } satisfies ElectrobunConfig;

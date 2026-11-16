@@ -66,8 +66,8 @@ win_stop() {
 }
 # Copy app sources to the Windows side, install deps there and build.
 win_build() {
-  rm -rf "$WIN_STAGE/app/src"
-  cp -r "$ROOT/app/src" "$WIN_STAGE/app/src" || return 1
+  rm -rf "$WIN_STAGE/app/src" "$WIN_STAGE/app/assets"
+  cp -r "$ROOT/app/src" "$WIN_STAGE/app/src" && cp -r "$ROOT/app/assets" "$WIN_STAGE/app/assets" || return 1
   if ! cmp -s "$ROOT/app/package.json" "$WIN_STAGE/app/package.json" || [ ! -d "$WIN_STAGE/app/node_modules" ]; then
     cp "$ROOT/app/package.json" "$ROOT/app/bun.lock" "$WIN_STAGE/app/" || return 1
     log "installing app deps (Windows)..."
