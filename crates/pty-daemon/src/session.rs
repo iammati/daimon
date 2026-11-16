@@ -33,8 +33,17 @@ pub enum SessionEvent {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SessionCommand {
-    /// Write raw bytes to the PTY (keystrokes, commands).
-    Write { tab_id: String, data: String },
+    /// Write raw bytes to the PTY (keystrokes, commands). `command`: the command line
+    /// this write starts, remembered so a reattaching UI can label the running block.
+    Write { tab_id: String, data: String, #[serde(default)] command: Option<String> },
+    /// Reattach to a session (after the UI restarted): running command, output, context.
+    Attach { req_id: String, tab_id: String },
+    /// Make the running full-screen program repaint (after a reattach).
+    Redraw { tab_id: String },
+    /// Daemon build and session count (the app checks before replacing an old daemon).
+    DaemonInfo { req_id: String },
+    /// Stop the daemon (ends all sessions).
+    Shutdown { req_id: String },
     /// Resize the PTY window.
     Resize { tab_id: String, cols: u16, rows: u16 },
     /// Close/kill the session.
@@ -105,11 +114,162 @@ fn pick_shell() -> String {
     env_shell.unwrap_or_else(|| "/bin/sh".into())
 }
 
+/// What a reconnecting UI needs to pick a session back up (see `Session::attach`).
+#[derive(Default)]
+struct SessionState {
+    /// A command is running (between OSC 133;C and the next 133;A).
+    running: bool,
+    /// What the UI said it was running (the `command` field of the Write that started it).
+    command: Option<String>,
+    command_hint: Option<String>,
+    started_at: i64,
+    alt_screen: bool,
+    /// Output of the running command as sent to the UI — the tail, capped.
+    output: String,
+    /// JSON context from the last prompt (cwd, git, …).
+    context: Option<String>,
+    exited: bool,
+    size: (u16, u16),
+    modes: Modes,
+}
+
+const REPLAY_LIMIT: usize = 2 << 20;
+
+impl SessionState {
+    fn push_output(&mut self, data: &str) {
+        self.output.push_str(data);
+        if self.output.len() > REPLAY_LIMIT {
+            let mut cut = self.output.len() - REPLAY_LIMIT;
+            while !self.output.is_char_boundary(cut) { cut += 1; }
+            self.output.drain(..cut);
+        }
+    }
+}
+
+/// Terminal modes a program set that a fresh terminal must be told again on reattach:
+/// private modes (mouse, bracketed paste, cursor, …) and the kitty keyboard flags stack.
+#[derive(Default)]
+struct Modes {
+    private: std::collections::BTreeMap<u16, bool>,
+    kitty_main: Vec<u32>,
+    kitty_alt: Vec<u32>,
+}
+
+const TRACKED_MODES: &[u16] = &[25, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 2004];
+
+impl Modes {
+    fn track(&mut self, s: &str, alt: bool) {
+        static PRIV: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+        static KITTY: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+        let priv_re = PRIV.get_or_init(|| regex_lite::Regex::new(r"\x1b\[\?([0-9;]+)([hl])").unwrap());
+        let kitty_re = KITTY.get_or_init(|| regex_lite::Regex::new(r"\x1b\[([><=])([0-9]*)(?:;([0-9]*))?u").unwrap());
+        for c in priv_re.captures_iter(s) {
+            let on = &c[2] == "h";
+            for code in c[1].split(';').filter_map(|n| n.parse::<u16>().ok()) {
+                if TRACKED_MODES.contains(&code) { self.private.insert(code, on); }
+            }
+        }
+        let stack = if alt { &mut self.kitty_alt } else { &mut self.kitty_main };
+        for c in kitty_re.captures_iter(s) {
+            let n: u32 = c[2].parse().unwrap_or(0);
+            match &c[1] {
+                ">" => { stack.push(n); if stack.len() > 16 { stack.remove(0); } }
+                "<" => { let k = (n.max(1) as usize).min(stack.len()); stack.truncate(stack.len() - k); }
+                _ => {
+                    // CSI = flags ; mode u — 1 set, 2 or, 3 and-not
+                    let cur = stack.last().copied().unwrap_or(0);
+                    let new = match c.get(3).map(|m| m.as_str()).unwrap_or("1") {
+                        "2" => cur | n,
+                        "3" => cur & !n,
+                        _ => n,
+                    };
+                    if let Some(top) = stack.last_mut() { *top = new } else { stack.push(new) }
+                }
+            }
+        }
+    }
+
+    fn kitty(stack: &[u32]) -> String {
+        stack.iter().map(|f| format!("\x1b[>{f}u")).collect()
+    }
+
+    /// Sequences that restore these modes in a fresh terminal: each screen's kitty
+    /// keyboard stack (main first, then switch to the alternate screen if it's active),
+    /// then the private modes.
+    fn prelude(&self, alt: bool) -> String {
+        let mut s = Self::kitty(&self.kitty_main);
+        if alt {
+            s.push_str("\x1b[?1049h");
+            s.push_str(&Self::kitty(&self.kitty_alt));
+        }
+        for (code, on) in &self.private {
+            s.push_str(&format!("\x1b[?{}{}", code, if *on { 'h' } else { 'l' }));
+        }
+        s
+    }
+}
+
+/// Reply to `attach`: everything a UI needs to show this session as it is now.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachInfo {
+    pub exists: bool,
+    pub running: bool,
+    pub command: Option<String>,
+    pub started_at: i64,
+    pub alt_screen: bool,
+    /// For a running command: the output so far (block commands), or the modes to
+    /// restore (full-screen programs, which are made to redraw instead).
+    pub output: String,
+    pub context: Option<String>,
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Longest prefix of `buf` that is complete UTF-8 (a multi-byte character split across
+/// reads stays in the buffer for the next read).
+fn take_utf8(buf: &mut Vec<u8>) -> String {
+    let valid = match std::str::from_utf8(buf) {
+        Ok(_) => buf.len(),
+        Err(e) if e.error_len().is_none() => e.valid_up_to(),
+        Err(_) => buf.len(), // invalid bytes: decode lossily
+    };
+    let rest = buf.split_off(valid);
+    let s = String::from_utf8_lossy(buf).into_owned();
+    *buf = rest;
+    s
+}
+
+/// True if `s` ends inside an OSC (ESC ]), APC (ESC _) or DCS (ESC P) string.
+fn has_open_string(s: &str) -> bool {
+    let mut rest = s;
+    while let Some(i) = rest.find('\x1b') {
+        let after = &rest[i + 1..];
+        if let Some(kind) = after.chars().next().filter(|c| matches!(c, ']' | '_' | 'P')) {
+            let body = &after[1..];
+            let st = body.find("\x1b\\");
+            let end = if kind == ']' { [body.find('\x07'), st].into_iter().flatten().min() } else { st };
+            match end {
+                None => return true,
+                Some(e) => { rest = &body[e..]; continue; }
+            }
+        }
+        rest = after;
+    }
+    false
+}
+
+/// Don't hold back output forever waiting for a terminator.
+const HOLD_LIMIT: usize = 32 << 20;
+
 pub struct Session {
     pub tab_id: String,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     event_tx: mpsc::Sender<SessionEvent>,
+    state: Arc<Mutex<SessionState>>,
 }
 
 impl Session {
@@ -123,6 +283,9 @@ impl Session {
 
         let shell = pick_shell();
         let mut cmd = CommandBuilder::new(&shell);
+        if let Some(home) = dirs::home_dir() {
+            cmd.cwd(home);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("TERM_PROGRAM", "daimon");
         cmd.env("COLORTERM", "truecolor");
@@ -148,46 +311,37 @@ impl Session {
         let master = pair.master;
 
         let writer = Arc::new(Mutex::new(writer));
+        let state = Arc::new(Mutex::new(SessionState { size: (120, 24), ..Default::default() }));
         let tx = event_tx.clone();
         let tid = tab_id.clone();
+        let reply_writer = writer.clone();
+        let st = state.clone();
 
         // One dedicated reader thread per session — owns the PTY master reader.
         // No shared state with other sessions.
         std::thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            let mut pending = String::new(); // carry incomplete OSC sequences across reads
+            let mut buf = [0u8; 16384];
+            let mut bytes: Vec<u8> = Vec::new(); // incomplete UTF-8 carried across reads
+            let mut pending = String::new(); // incomplete OSC/APC/DCS carried across reads
+            let mut graphics = crate::kitty_graphics::KittyGraphics::default();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        bytes.extend_from_slice(&buf[..n]);
+                        pending.push_str(&take_utf8(&mut bytes));
 
-                        // Don't emit if an OSC sequence is open but not yet terminated
-                        // ESC ] started but no BEL or ST yet — wait for next read
-                        if pending.contains('\x1b') {
-                            let has_open_osc = {
-                                let mut s = pending.as_str();
-                                let mut open = false;
-                                while let Some(i) = s.find('\x1b') {
-                                    let rest = &s[i+1..];
-                                    if rest.starts_with(']') {
-                                        // Check if terminated
-                                        let after = &rest[1..];
-                                        if !after.contains('\x07') && !after.contains("\x1b\\") {
-                                            open = true;
-                                            break;
-                                        }
-                                    }
-                                    s = &s[i+1..];
-                                }
-                                open
-                            };
-                            if has_open_osc {
-                                continue; // wait for next chunk to complete the sequence
-                            }
+                        // Wait for the rest of an unterminated OSC/APC/DCS string.
+                        if pending.len() < HOLD_LIMIT && has_open_string(&pending) {
+                            continue;
                         }
 
-                        let raw = std::mem::take(&mut pending);
+                        // Kitty graphics → inline images; answer the program's queries.
+                        let (raw, replies) = graphics.process(&std::mem::take(&mut pending));
+                        if !replies.is_empty() {
+                            let mut w = reply_writer.lock().unwrap();
+                            for r in replies { let _ = w.write_all(r.as_bytes()); }
+                        }
 
                         // Detect semantic events before any stripping
                         let alt_enter = is_alt_screen_enter(&raw);
@@ -197,6 +351,27 @@ impl Session {
 
                         // Strip PTY mode sequences + OSC 133 markers (already detected above); convert OSC 8 to markers
                         let data = convert_osc8(&strip_osc133(&strip_pty_modes(&raw)));
+
+                        {
+                            let mut s = st.lock().unwrap();
+                            if cmd_start {
+                                s.running = true;
+                                s.command = s.command_hint.take();
+                                s.started_at = now_ms();
+                                s.output.clear();
+                                s.modes = Modes::default();
+                            }
+                            if alt_enter { s.alt_screen = true; }
+                            let alt = s.alt_screen;
+                            s.modes.track(&raw, alt);
+                            if alt_exit { s.alt_screen = false; s.modes.kitty_alt.clear(); }
+                            if s.running { s.push_output(&data); }
+                            if prompt {
+                                s.running = false;
+                                s.alt_screen = false;
+                                if let Some(ctx) = extract_context_json(&raw) { s.context = Some(ctx); }
+                            }
+                        }
 
                         let _ = tx.blocking_send(SessionEvent::Output {
                             tab_id: tid.clone(),
@@ -223,14 +398,21 @@ impl Session {
                 }
             }
 
+            st.lock().unwrap().exited = true;
             let code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
             let _ = tx.blocking_send(SessionEvent::Exit { tab_id: tid, code });
         });
 
-        Ok(Self { tab_id, writer, master, event_tx })
+        Ok(Self { tab_id, writer, master, event_tx, state })
     }
 
-    pub fn write(&self, data: &str) -> Result<()> {
+    pub fn write(&self, data: &str, command: Option<String>) -> Result<()> {
+        if self.state.lock().unwrap().exited {
+            anyhow::bail!("session exited");
+        }
+        if command.is_some() {
+            self.state.lock().unwrap().command_hint = command;
+        }
         let mut w = self.writer.lock().unwrap();
         w.write_all(data.as_bytes())?;
         Ok(())
@@ -238,7 +420,38 @@ impl Session {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         tracing::debug!("resize tab={} {}x{}", self.tab_id, cols, rows);
         self.master.resize(PtySize { cols, rows, pixel_width: 0, pixel_height: 0 })?;
+        self.state.lock().unwrap().size = (cols, rows);
         Ok(())
+    }
+
+    /// Snapshot for a reconnecting UI. A full-screen program can't be replayed from a
+    /// capped byte tail, so it only gets its modes restored; the UI then asks for a
+    /// `redraw` once its terminal is ready to receive one.
+    pub fn attach(&self) -> AttachInfo {
+        let s = self.state.lock().unwrap();
+        AttachInfo {
+            exists: !s.exited,
+            running: s.running && !s.exited,
+            command: s.command.clone(),
+            started_at: s.started_at,
+            alt_screen: s.alt_screen,
+            output: if !s.running {
+                String::new()
+            } else if s.alt_screen {
+                s.modes.prelude(true)
+            } else {
+                format!("{}{}", s.modes.prelude(false), s.output)
+            },
+            context: s.context.clone(),
+        }
+    }
+
+    /// Make the running program repaint: resize to one row less and back (SIGWINCH).
+    pub fn redraw(&self) {
+        let (cols, rows) = self.state.lock().unwrap().size;
+        let _ = self.master.resize(PtySize { cols, rows: rows.saturating_sub(1).max(1), pixel_width: 0, pixel_height: 0 });
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let _ = self.master.resize(PtySize { cols, rows, pixel_width: 0, pixel_height: 0 });
     }
 }
 
@@ -271,11 +484,30 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn write(&mut self, tab_id: &str, data: &str) -> Result<()> {
+    pub fn write(&mut self, tab_id: &str, data: &str, command: Option<String>) -> Result<()> {
         self.sessions
             .get(tab_id)
             .context("no session for tab")?
-            .write(data)
+            .write(data, command)
+    }
+
+    /// Reattach a UI to a session; `exists: false` if there's no live one.
+    pub fn attach(&self, tab_id: &str) -> AttachInfo {
+        match self.sessions.get(tab_id) {
+            Some(s) => s.attach(),
+            None => AttachInfo {
+                exists: false, running: false, command: None, started_at: 0,
+                alt_screen: false, output: String::new(), context: None,
+            },
+        }
+    }
+
+    pub fn redraw(&self, tab_id: &str) {
+        if let Some(s) = self.sessions.get(tab_id) { s.redraw(); }
+    }
+
+    pub fn len(&self) -> usize {
+        self.sessions.len()
     }
 
     pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) -> Result<()> {
@@ -304,7 +536,7 @@ mod tests {
         let session = Session::spawn("tab-1".into(), tx).unwrap();
 
         // Run a quick command and exit
-        session.write("echo hello_daimon\nexit\n").unwrap();
+        session.write("echo hello_daimon\nexit\n", None).unwrap();
 
         let mut got_output = false;
         let mut got_exit = false;
@@ -337,8 +569,8 @@ mod tests {
         let s1 = Session::spawn("tab-1".into(), tx1).unwrap();
         let s2 = Session::spawn("tab-2".into(), tx2).unwrap();
 
-        s1.write("echo from_tab_1\nexit\n").unwrap();
-        s2.write("echo from_tab_2\nexit\n").unwrap();
+        s1.write("echo from_tab_1\nexit\n", None).unwrap();
+        s2.write("echo from_tab_2\nexit\n", None).unwrap();
 
         let mut tab1_saw_tab2 = false;
 
@@ -365,7 +597,7 @@ mod tests {
     #[test]
     fn write_to_missing_session_errors() {
         let (tx, _rx) = mpsc::channel(64);
-        let mgr = SessionManager::new(tx);
-        assert!(mgr.write("nonexistent", "hello\n").is_err());
+        let mut mgr = SessionManager::new(tx);
+        assert!(mgr.write("nonexistent", "hello\n", None).is_err());
     }
 }

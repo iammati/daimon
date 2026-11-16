@@ -1,66 +1,16 @@
 import { BrowserWindow, ApplicationMenu } from "electrobun/bun";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { connectDaemon } from "./daemon";
 import {
   attachVariableBlur, backdropForBlur, loadVariableBlur, prepareWindow, setBackdrop, setVariableBlur,
   type BackdropKind,
 } from "./winBackdrop";
 import { enablePinchZoom } from "./macMagnification";
+import { focusWebview } from "./winFocus";
 
-// ── Spawn pty-daemon ──────────────────────────────────────────────────────────
-// In dev the daemon is already running (started separately).
-// In prod it's bundled next to the app binary.
+// ── pty-daemon ────────────────────────────────────────────────────────────────
+// Dev: dev.sh runs it. Prod: find the running daemon or start one (see daemon.ts).
 const isDev = process.env.NODE_ENV !== "production";
-
-let daemonProc: ReturnType<typeof Bun.spawn> | null = null;
-
-if (!isDev) {
-  // Prod: daemon binary is in the same dir as this script
-  const daemonPath = resolve(import.meta.dir, "../pty-daemon");
-  let cmd = [daemonPath, "--exit-with-parent"];
-  if (process.platform === "win32") {
-    // The Windows app (built from WSL by build.sh) bundles the Linux daemon and runs it
-    // inside WSL; Windows reaches it on :7878 through WSL's localhost forwarding.
-    // "wsl-distro" names the distro it was built in (absent → the default distro).
-    const distroFile = resolve(import.meta.dir, "../wsl-distro");
-    const distro = existsSync(distroFile) ? readFileSync(distroFile, "utf8").trim() : "";
-    const wsl = ["wsl.exe", ...(distro ? ["-d", distro] : []), "--cd", "~", "--exec"];
-    const linuxPath = Bun.spawnSync([...wsl, "wslpath", "-u", daemonPath]).stdout.toString().trim();
-    if (!linuxPath) console.error("[main] couldn't resolve the daemon path inside WSL", distro || "(default distro)");
-    cmd = [...wsl, linuxPath, "--exit-with-parent"];
-  }
-  daemonProc = Bun.spawn(cmd, {
-    // Held open for our lifetime: the daemon exits when it closes (--exit-with-parent).
-    stdin: "pipe",
-    // Not piped: nothing reads the pipes, and a full pipe would stall the daemon.
-    stdout: "inherit",
-    stderr: "inherit",
-    env: { ...Bun.env },
-  });
-  console.log("[main] pty-daemon spawned, pid:", daemonProc.pid);
-}
-
-// ── Wait for daemon to be ready ───────────────────────────────────────────────
-async function waitForDaemon(url: string, retries = 20): Promise<void> {
-  for (let i = 0; i < retries; i++) {
-    try {
-      // WebSocket connect attempt
-      const ws = new WebSocket(url);
-      await new Promise<void>((resolve, reject) => {
-        // A refused connection can take seconds to fail on Windows — don't wait for it.
-        const timer = setTimeout(() => { ws.close(); reject(); }, 500);
-        ws.onopen = () => { clearTimeout(timer); ws.close(); resolve(); };
-        ws.onerror = () => { clearTimeout(timer); reject(); };
-      });
-      return;
-    } catch {
-      await Bun.sleep(150);
-    }
-  }
-  console.warn("[main] daemon not ready after retries, proceeding anyway");
-}
-
-await waitForDaemon("ws://localhost:7878");
+const daemon = await connectDaemon(isDev);
 
 // Native see-through windows composite reliably on macOS and on Windows (WebView2 +
 // DWM, which also gives real desktop blur — see winBackdrop.ts). On Linux/WSLg
@@ -77,6 +27,8 @@ const baseUrl = isDev ? "http://localhost:7881" : "views://daimon2/index.html";
 // DAIMON_BACKDROP pins a DWM look, which also means steps.
 const variableBlur = nativeTransparent && isWindows && !process.env.DAIMON_BACKDROP && loadVariableBlur();
 const query = [
+  daemon && `daimon_token=${daemon.token}`,
+  daemon && `daimon_port=${daemon.port}`,
   nativeTransparent && "transparent=1",
   nativeTransparent && isWindows && (variableBlur ? "blur=variable" : "blur=steps"),
 ].filter(Boolean);
@@ -135,6 +87,17 @@ const win = new BrowserWindow({
 
 enablePinchZoom(); // macOS only
 
+// Window re-activated (un-minimize, alt-tab / click back from another app): give the
+// page keyboard focus and tell it, so the command input is focused right away. The
+// page can't rely on its own `focus` event — on Windows, WebView2 only receives focus
+// when the host forwards it (focusWebview), and only then does that event fire.
+win.on("focus", () => {
+  setTimeout(() => {
+    if (isWindows) focusWebview(win.ptr);
+    win.webview.executeJavascript(`window.dispatchEvent(new Event("daimon:host-focus"))`);
+  }, 30); // let the OS finish activation (it focuses the frame window last)
+});
+
 // Windows: blur the desktop behind the window. The UI reports the blur slider
 // through window.__electrobunSendToHost({ type: "glass", blur }).
 if (isWindows && nativeTransparent) {
@@ -176,4 +139,4 @@ if (isWindows && nativeTransparent) {
   }
 }
 
-console.log("[main] window opened →", frontendUrl);
+console.log("[main] window opened →", frontendUrl.replace(/daimon_token=[^&]+/, "daimon_token=…"));

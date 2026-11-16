@@ -17,6 +17,8 @@ pub fn strip_pty_modes(s: &str) -> String {
     let re = regex_lite::Regex::new(r"\x1b\[\?[0-9;]*[hlsur]").unwrap();
     re.replace_all(s, |caps: &regex_lite::Captures| {
         let m = caps.get(0).unwrap().as_str();
+        // CSI ? u is the kitty keyboard protocol's flags query — the terminal answers it.
+        if m == "\x1b[?u" { return m.to_string(); }
         // Extract the numeric code(s) — everything between '?' and the final letter
         let code_str = &m[3..m.len()-1];
         let preserve = code_str.split(';').any(|c| matches!(c,

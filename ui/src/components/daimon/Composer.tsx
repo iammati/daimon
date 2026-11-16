@@ -384,6 +384,7 @@ export function Composer({
           )}
           <textarea
             ref={inputRef}
+            data-composer=""
             rows={1}
             defaultValue={initialValue}
             onChange={(e) => {

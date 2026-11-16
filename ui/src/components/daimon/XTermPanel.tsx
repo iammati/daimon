@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
+import { syncTerminalSelection } from "@/lib/daimon/themeColors";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
+import { attachGpuRenderer } from "@/lib/daimon/gpu";
 
 export type XTermHandle = {
   feed: (bytes: Uint8Array) => void;
@@ -64,7 +66,6 @@ export function XTermPanel({ visible, onReady, onData, onResize, onAltScreen }: 
         brightCyan: "#56d4dd",
         brightWhite: "#f0f6fc",
         cursor: "#58a6ff",
-        selectionBackground: "#264f78",
       },
       allowProposedApi: true,
       scrollback: 5000,
@@ -78,6 +79,8 @@ export function XTermPanel({ visible, onReady, onData, onResize, onAltScreen }: 
     term.loadAddon(unicode11);
     term.unicode.activeVersion = '11';
     term.open(el);
+    attachGpuRenderer(term);
+    const stopSelectionSync = syncTerminalSelection(term);
 
     if (onResize) term.onResize(({ cols, rows }) => onResize(cols, rows));
     term.onData(onData);
@@ -129,6 +132,7 @@ export function XTermPanel({ visible, onReady, onData, onResize, onAltScreen }: 
       window.removeEventListener("resize", onWindowResize);
       fitRef.current = null;
       termRef.current = null;
+      stopSelectionSync();
       term.dispose();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps

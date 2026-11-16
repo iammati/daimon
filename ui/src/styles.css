@@ -70,6 +70,7 @@
   --paper:           oklch(0.974 0.002 264);
   --line:            oklch(0.913 0.006 264);
   --signal:          oklch(0.585 0.192 269);   /* indigo */
+  --selection:       color-mix(in oklch, var(--signal) 24%, transparent);  /* text selection (CSS + xterm) */
   --signal-soft:     oklch(0.940 0.038 269);
   --alarm:           oklch(0.62 0.205 25);
   --amber:           oklch(0.77 0.155 70);
@@ -115,6 +116,7 @@
   --paper:           oklch(0.130 0.012 270);
   --line:            oklch(1 0 0 / 0.08);
   --signal:          oklch(0.638 0.185 269);
+  --selection:       color-mix(in oklch, var(--signal) 40%, transparent);  /* text selection (CSS + xterm) */
   --signal-soft:     oklch(0.175 0.035 269);
   --alarm:           oklch(0.67 0.2 25);
   --amber:           oklch(0.79 0.15 70);
@@ -160,6 +162,7 @@
   --paper:              oklch(0.215 0.024 275);
   --line:               oklch(0.330 0.030 275);
   --signal:             oklch(0.762 0.207 300);
+  --selection:       color-mix(in oklch, var(--signal) 36%, transparent);  /* text selection (CSS + xterm) */
   --signal-soft:        oklch(0.215 0.045 300);
   --alarm:              oklch(0.640 0.220 25);
   --amber:              oklch(0.790 0.150 65);
@@ -235,9 +238,9 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
   }
+  /* Translucent theme accent; no `color`, so syntax/diff colors stay readable while selected. */
   ::selection {
-    background: var(--signal-soft);
-    color: var(--accent-foreground);
+    background: var(--selection);
   }
   :focus-visible {
     outline: 2px solid var(--signal);
@@ -302,6 +305,16 @@
   }
 }
 
+/* Data/code palette, shared by highlight.js and the pretty JSON/YAML view.
+   Rule: content stays neutral, keys recede, colour marks only small typed tokens —
+   so long output never turns into a wall of accent colour. */
+:root {
+  --code-key:     color-mix(in oklch, var(--foreground) 55%, transparent);
+  --code-string:  color-mix(in oklch, var(--foreground) 90%, transparent);
+  --code-number:  oklch(0.72 0.08 195);
+  --code-literal: var(--signal);
+}
+
 /* highlight.js — cool 3-hue theme: blue / violet / teal */
 .hljs                                          { background: transparent; color: var(--foreground); }
 .hljs-comment, .hljs-quote                     { color: var(--muted-foreground); font-style: italic; }
@@ -312,14 +325,22 @@
 .hljs-title, .hljs-section                     { color: var(--signal); }
 
 /* strings, attributes → soft violet (same hue family as signal, slightly warmer) */
-.hljs-string, .hljs-attribute,
+.hljs-string,
 .hljs-template-tag, .hljs-template-variable,
-.hljs-addition, .hljs-attr                     { color: oklch(0.68 0.12 310); }
+.hljs-addition                                 { color: oklch(0.7 0.09 310); }
+
+/* keys (JSON/YAML/TOML) recede; YAML scalars are content, not "strings" */
+.hljs-attr, .hljs-attribute                    { color: var(--code-key); }
+.language-yaml .hljs-string,
+.language-json .hljs-string,
+.language-ini .hljs-string                     { color: var(--code-string); }
+.language-yaml .hljs-literal,
+.language-json .hljs-literal                   { color: var(--code-literal); }
 
 /* numbers, literals, symbols → desaturated teal */
 .hljs-number, .hljs-literal, .hljs-regexp,
 .hljs-symbol, .hljs-bullet, .hljs-variable,
-.hljs-selector-id, .hljs-selector-class        { color: oklch(0.64 0.09 195); }
+.hljs-selector-id, .hljs-selector-class        { color: var(--code-number); }
 
 .hljs-deletion, .hljs-meta                     { color: var(--alarm); }
 .hljs-type, .hljs-doctag                       { color: var(--foreground); opacity: 0.7; }

@@ -21,6 +21,11 @@ portable-pty = "0.9"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+flate2 = "1"
+png = "0.17"
+sha2 = "0.10"
+regex-lite = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

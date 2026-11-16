@@ -7,12 +7,17 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 use tracing::{error, info};
 
-pub async fn serve(addr: &str, db: Store) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -> Result<()> {
     let db = Arc::new(db);
+    let token = Arc::new(token);
 
     // Single event bus: all sessions → all connected WebSocket clients
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(1024);
@@ -37,13 +42,25 @@ pub async fn serve(addr: &str, db: Store) -> Result<()> {
 
         let mgr = mgr.clone();
         let db = db.clone();
+        let token = token.clone();
         let (client_tx, mut client_rx) = mpsc::channel::<SessionEvent>(256);
         clients.lock().await.push(client_tx.clone());
 
         tokio::spawn(async move {
-            let ws = match tokio_tungstenite::accept_async(stream).await {
+            // Every client must present the token (?token=…): the daemon runs shells, and
+            // any web page can open a WebSocket to localhost.
+            let check = |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
+                let ok = req.uri().query().is_some_and(|q| {
+                    q.split('&').any(|kv| kv.strip_prefix("token=").is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes())))
+                });
+                if ok { return Ok(resp); }
+                let mut deny = ErrorResponse::new(Some("unauthorized".into()));
+                *deny.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+                Err(deny)
+            };
+            let ws = match tokio_tungstenite::accept_hdr_async(stream, check).await {
                 Ok(ws) => ws,
-                Err(_) => return,
+                Err(e) => { info!("rejected connection from {}: {}", addr, e); return; }
             };
             let (mut sink, mut source) = ws.split();
 
@@ -58,15 +75,36 @@ pub async fn serve(addr: &str, db: Store) -> Result<()> {
                 if let Message::Text(text) = msg {
                     let cmd: Result<SessionCommand, _> = serde_json::from_str(&text);
                     match cmd {
-                        Ok(SessionCommand::Write { tab_id, data }) => {
+                        Ok(SessionCommand::Write { tab_id, data, command }) => {
                             let mut mgr = mgr.lock().await;
-                            if mgr.write(&tab_id, &data).is_err() {
+                            if mgr.write(&tab_id, &data, command.clone()).is_err() {
                                 if let Err(e) = mgr.open(tab_id.clone()) {
                                     error!("open session {}: {}", tab_id, e);
                                     continue;
                                 }
-                                let _ = mgr.write(&tab_id, &data);
+                                let _ = mgr.write(&tab_id, &data, command);
                             }
+                        }
+                        Ok(SessionCommand::Attach { req_id, tab_id }) => {
+                            let info = mgr.lock().await.attach(&tab_id);
+                            info!("attach {}: exists={} running={}", tab_id, info.exists, info.running);
+                            let data = serde_json::to_value(info).unwrap_or_default();
+                            let _ = client_tx.send(SessionEvent::Response { req_id, ok: true, data }).await;
+                        }
+                        Ok(SessionCommand::Redraw { tab_id }) => {
+                            mgr.lock().await.redraw(&tab_id);
+                        }
+                        Ok(SessionCommand::DaemonInfo { req_id }) => {
+                            let sessions = mgr.lock().await.len();
+                            let data = serde_json::json!({ "build": crate::daemon_info::build_id(), "sessions": sessions, "pid": std::process::id() });
+                            let _ = client_tx.send(SessionEvent::Response { req_id, ok: true, data }).await;
+                        }
+                        Ok(SessionCommand::Shutdown { req_id }) => {
+                            info!("shutdown requested");
+                            let _ = client_tx.send(SessionEvent::Response { req_id, ok: true, data: serde_json::Value::Bool(true) }).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            crate::daemon_info::unpublish(port);
+                            std::process::exit(0);
                         }
                         Ok(SessionCommand::Resize { tab_id, cols, rows }) => {
                             let mgr = mgr.lock().await;

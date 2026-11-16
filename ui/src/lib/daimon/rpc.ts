@@ -1,8 +1,40 @@
 import type { GitBranchNode } from "./shell";
 /// WebSocket transport shim — identical shell API surface to the Electrobun RPC version.
-/// Connects to the Rust pty-daemon at ws://localhost:7878.
+/// Connects to the Rust pty-daemon at ws://localhost:<port>/?token=<token>.
+///
+/// The daemon only accepts clients with its token. The app passes it (and the port) in
+/// the page URL — ?daimon_token=…&daimon_port=… — and we keep it in sessionStorage so
+/// reloads work after the URL is cleaned up. In a plain browser on the Vite dev server,
+/// it comes from the dev server's /__daimon endpoint instead (same-origin only).
 
-const WS_URL = "ws://localhost:7878";
+type Creds = { token: string; port: number };
+const CREDS_KEY = "daimon-daemon";
+
+function credsFromUrl(): Creds | null {
+  const url = new URL(window.location.href);
+  const token = url.searchParams.get("daimon_token");
+  if (!token) return null;
+  const port = Number(url.searchParams.get("daimon_port")) || 7878;
+  url.searchParams.delete("daimon_token");
+  url.searchParams.delete("daimon_port");
+  history.replaceState(history.state, "", url);
+  return { token, port };
+}
+
+let creds: Creds | null = (() => {
+  const fromUrl = credsFromUrl();
+  if (fromUrl) { try { sessionStorage.setItem(CREDS_KEY, JSON.stringify(fromUrl)); } catch { /**/ } return fromUrl; }
+  try { const saved = sessionStorage.getItem(CREDS_KEY); return saved ? JSON.parse(saved) as Creds : null; } catch { return null; }
+})();
+
+async function fetchDevCreds(): Promise<Creds | null> {
+  try {
+    const r = await fetch("/__daimon", { cache: "no-store" });
+    if (!r.ok) return null;
+    const c = await r.json() as Creds;
+    return c.token ? c : null;
+  } catch { return null; }
+}
 
 export type ShellContext = {
   region?: string;
@@ -71,12 +103,25 @@ function request<T>(msg: object, timeoutMs = 5000): Promise<T> {
 
 let ws: WebSocket | null = null;
 const pending: string[] = [];
+let failures = 0;
 
-function connect() {
-  ws = new WebSocket(WS_URL);
-  ws.onopen = () => { while (pending.length) ws!.send(pending.shift()!); };
+async function connect() {
+  // No token yet, or it keeps getting refused (daemon replaced): ask the dev server.
+  if (!creds || failures >= 2) {
+    const dev = await fetchDevCreds();
+    if (dev) { creds = dev; try { sessionStorage.setItem(CREDS_KEY, JSON.stringify(dev)); } catch { /**/ } }
+  }
+  // No token anywhere: try without one. Only a daemon from before token auth accepts
+  // that (a dev session started by an old dev.sh); current daemons refuse it.
+  if (!creds) console.warn("[rpc] no daemon token — start daimon through the app (or dev.sh)");
+  let opened = false;
+  ws = new WebSocket(creds
+    ? `ws://localhost:${creds.port}/?token=${encodeURIComponent(creds.token)}`
+    : "ws://localhost:7878");
+  ws.onopen = () => { opened = true; failures = 0; while (pending.length) ws!.send(pending.shift()!); };
   ws.onclose = () => {
     ws = null;
+    if (!opened) failures++;
     // Reject all pending requests so callers don't hang across reconnect
     for (const [, p] of pendingRequests) p.reject(new Error("disconnected"));
     pendingRequests.clear();
@@ -109,7 +154,7 @@ function connect() {
     }
   };
 }
-connect();
+void connect();
 
 function send(msg: object) {
   const json = JSON.stringify(msg);
@@ -124,6 +169,18 @@ type GitStatus = { branch: string; upstream?: string | null; ahead: number; behi
 type LogEntry  = { hash: string; fullHash: string; date: string; subject: string; author: string; isHead?: boolean };
 type CommitDetail = { files: { status: string; path: string; additions: number; deletions: number }[]; body: string };
 
+/** A shell as the daemon has it (see `attach`). */
+export type AttachInfo = {
+  exists: boolean;
+  running: boolean;
+  command: string | null;
+  startedAt: number;
+  altScreen: boolean;
+  /** Running command: output so far, or (full-screen programs) the modes to restore. */
+  output: string;
+  context: string | null;
+};
+
 type AltScreenListener = (tabId: string, enter: boolean) => void;
 const altScreenListeners = new Set<AltScreenListener>();
 
@@ -135,6 +192,24 @@ export const shell = {
   onAltScreen:    (fn: AltScreenListener)    => { altScreenListeners.add(fn);     return () => altScreenListeners.delete(fn); },
 
   write:  (tabId: string, data: string) => { send({ type: "write", tab_id: tabId, data }); return Promise.resolve(); },
+  /** Make a resumed full-screen program repaint (resize dance → SIGWINCH). */
+  redraw: (tabId: string) => { send({ type: "redraw", tab_id: tabId }); return Promise.resolve(); },
+  /** Write that starts a command; the daemon remembers `command` to label it on reattach. */
+  writeCommand: (tabId: string, data: string, command: string) => { send({ type: "write", tab_id: tabId, data, command }); return Promise.resolve(); },
+  /**
+   * Reattach to a tab's shell after the UI (re)started. Also replays the last prompt
+   * context to onContext listeners, as if the prompt had just been drawn.
+   */
+  attach: async (tabId: string): Promise<AttachInfo> => {
+    const info = await request<AttachInfo>({ type: "attach", tab_id: tabId });
+    if (info.exists && info.context) {
+      let ctx: ShellContext = {};
+      try { ctx = JSON.parse(info.context); } catch { /* bare prompt */ }
+      lastContext.set(tabId, ctx);
+      if (!info.running) contextListeners.forEach((fn) => fn(tabId, ctx));
+    }
+    return info;
+  },
   resize: (tabId: string, cols: number, rows: number) => {
     const c = Math.min(Math.max(cols, 10), 500);
     const r = Math.min(Math.max(rows, 2), 300);

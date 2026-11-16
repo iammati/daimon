@@ -6,12 +6,15 @@ import { toast } from "sonner";
 import { Keys } from "./Kbd";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
-import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, STREAMING_INTERACTIVE_RE, abandonRun } from "@/lib/daimon/shell";
+import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
 import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode } from "@/lib/daimon/shell";
 import { Terminal } from "@xterm/xterm";
+import { syncTerminalSelection } from "@/lib/daimon/themeColors";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { ImageAddon } from "@xterm/addon-image";
+import { attachGpuRenderer } from "@/lib/daimon/gpu";
+import { attachKittyKeyboard } from "@/lib/daimon/kittyKeyboard";
 import "@xterm/xterm/css/xterm.css";
 import hljs from "highlight.js/lib/core";
 import hljsBash from "highlight.js/lib/languages/bash";
@@ -134,9 +137,8 @@ function detectLang(input: string, text: string): string | null {
   if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length > 10) {
     try { JSON.parse(text); return "json"; } catch { /* not json */ }
   }
-  // YAML heuristic: multiple "key: value" lines, no leading dashes (flags), no prose sentences
-  if (!trimmed.includes("{") && /^[a-zA-Z_][a-zA-Z0-9_-]*:\s+\S/m.test(text) &&
-      text.split("\n").length > 2 && !/^--/.test(trimmed) && !/\s{2,}[A-Z]/.test(text)) return "yaml";
+  // YAML: strict structural check (shared with the output parser) — prose with a "word:" prefix stays plain.
+  if (!/^--\w/.test(trimmed) && looksLikeYaml(text)) return "yaml";
   return null;
 }
 
@@ -147,7 +149,7 @@ function CodeView({ text, lang }: { text: string; lang: string }) {
   }, [text, lang]);
   return (
     <pre className="font-mono text-[length:var(--terminal-font-size,13px)] leading-6 overflow-x-auto">
-      <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+      <code className={`hljs language-${lang}`} dangerouslySetInnerHTML={{ __html: highlighted }} />
     </pre>
   );
 }
@@ -591,6 +593,8 @@ function CommitDetailView({
 }
 
 // ── Shared fullscreen pager shell ────────────────────────────────────────────
+/** Max commits "expand all" opens in git log (each one fetches its file list). */
+const EXPAND_ALL_LIMIT = 50;
 type OpenPager = { pane: string | null };
 /** Open pagers in open order; the last one per pane owns the keyboard. */
 const openPagers: OpenPager[] = [];
@@ -635,6 +639,7 @@ function FullscreenPager({
   const [container, setContainer] = useState<HTMLElement | null>(null);
   const [search, setSearch] = useState("");
   const entryRef = useRef<OpenPager | null>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
 
   // Resolve the pane this pager lives in before paint, so the overlay is
   // always scoped to its own split pane (never the whole window).
@@ -691,6 +696,22 @@ function FullscreenPager({
         return;
       }
       if (inSearch) { onKey(e, true); return; } // let every character (q, /, f…) be typed
+      // Free scrolling, independent of the row cursor: Shift+↑/↓ in line steps, PageUp/PageDown by page.
+      const scroller = overlayRef.current?.querySelector<HTMLElement>("[data-pager-scroll]");
+      if (scroller && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const line = 20;
+        let dy = 0;
+        if (e.shiftKey && e.key === "ArrowDown") dy = line * 3;
+        else if (e.shiftKey && e.key === "ArrowUp") dy = -line * 3;
+        else if (e.key === "PageDown") dy = scroller.clientHeight - line * 2;
+        else if (e.key === "PageUp") dy = -(scroller.clientHeight - line * 2);
+        if (dy) {
+          e.preventDefault();
+          // Key-repeat (holding the key) scrolls instantly so it stays fluid; single presses glide.
+          scroller.scrollBy({ top: dy, behavior: e.repeat ? "auto" : "smooth" });
+          return;
+        }
+      }
       if (e.key === "q") {
         e.preventDefault();
         setFullscreen(false);
@@ -725,7 +746,7 @@ function FullscreenPager({
     <>
       <span ref={sentinelRef} style={{ display: "none" }} />
       {container && createPortal(
-    <div className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background pager-overlay font-mono text-[13px]`}>
+    <div ref={overlayRef} className={`${isScoped ? "absolute" : "fixed"} inset-0 z-50 flex flex-col bg-background pager-overlay font-mono text-[13px]`}>
       <div className="flex items-center gap-3 border-b border-border px-4 py-2 shrink-0">
         <span className="text-muted-foreground/60">{title}</span>
         {headerMeta}
@@ -742,6 +763,7 @@ function FullscreenPager({
         </div>
         <span className="ml-auto flex items-center gap-4 text-[11px] text-muted-foreground/60">
           <PagerHint keys={["↑↓", "jk"]} label="navigate" />
+          <PagerHint keys={["⇧↑↓"]} label="scroll" />
           <PagerHint keys={["←→", "hl"]} label="expand" />
           <PagerHint keys={["Enter"]} label="toggle" />
           <PagerHint keys={["⌘⇧A"]} label={allCollapsed ? "expand all" : "collapse all"} className={allCollapsed ? "text-signal/80" : ""} />
@@ -763,7 +785,6 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [openFiles, setOpenFiles] = useState<Record<string, Set<string>>>({});
   const [fileCounts, setFileCounts] = useState<Record<string, number>>({});
-  const [allCollapsed, setAllCollapsed] = useState(false);
   const commitRowRefs = useRef<(HTMLDivElement | null)[]>([]);
   const fileRowRefs = useRef<Record<string, (HTMLDivElement | null)[]>>({});
   const filePathsRef = useRef<Record<string, string[]>>({});
@@ -840,8 +861,14 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
       isLast={isLast ?? false}
       collapsedSummary={<span className="text-muted-foreground/50">{entries.length} commit{entries.length !== 1 ? "s" : ""}</span>}
       headerMeta={<span className="text-muted-foreground/50">{entries.length} commit{entries.length !== 1 ? "s" : ""}</span>}
-      allCollapsed={allCollapsed}
-      onToggleAll={() => { if (allCollapsed) { setExpanded(new Set()); setAllCollapsed(false); } else { setExpanded(new Set()); setAllCollapsed(true); } }}
+      allCollapsed={expanded.size === 0}
+      onToggleAll={() => {
+        if (expanded.size > 0) { setExpanded(new Set()); setFileIdx(null); return; }
+        // Each expanded commit fetches its details — cap how many open at once.
+        const visible = filteredRef.current;
+        setExpanded(new Set(visible.slice(0, EXPAND_ALL_LIMIT).map((e) => e.hash)));
+        if (visible.length > EXPAND_ALL_LIMIT) toast(`Expanded the first ${EXPAND_ALL_LIMIT} of ${visible.length} commits`, { duration: 2500 });
+      }}
       onKey={onKey}
     >
       {(search: string) => {
@@ -859,7 +886,7 @@ function GitLogView({ entries: rawEntries, cwd, kind: _kind, isLast }: Extract<O
           : entries;
         filteredRef.current = filtered;
         return (
-          <div className="flex-1 overflow-y-auto divide-y divide-border/30">
+          <div data-pager-scroll className="flex-1 overflow-y-auto divide-y divide-border/30">
             {filtered.map((e, i) => {
               const open = expanded.has(e.hash);
               const active = i === commitIdx && fileIdx === null;
@@ -1376,7 +1403,7 @@ function PrettyView({ format, text }: { format: "json" | "yaml"; text: string })
   const lines = text.split("\n");
   const highlighted = format === "json"
     ? lines.map((line, i) => {
-        // JSON: keys in muted, strings in signal, numbers in amber, booleans/null in purple
+        // JSON: dimmed keys, neutral string values; colour only for numbers and true/false/null.
         const parts: React.ReactNode[] = [];
         let rest = line;
         let key = 0;
@@ -1384,26 +1411,26 @@ function PrettyView({ format, text }: { format: "json" | "yaml"; text: string })
         const keyMatch = rest.match(/^(\s*)("(?:[^"\\]|\\.)*")(\s*:\s*)/);
         if (keyMatch) {
           parts.push(<span key={key++}>{keyMatch[1]}</span>);
-          parts.push(<span key={key++} className="text-foreground/70">{keyMatch[2]}</span>);
+          parts.push(<span key={key++} className="text-[color:var(--code-key)]">{keyMatch[2]}</span>);
           parts.push(<span key={key++}>{keyMatch[3]}</span>);
           rest = rest.slice(keyMatch[0].length);
         }
         // Match value
         const strMatch = rest.match(/^("(?:[^"\\]|\\.)*")(,?\s*)$/);
         if (strMatch) {
-          parts.push(<span key={key++} className="text-signal">{strMatch[1]}</span>);
+          parts.push(<span key={key++} className="text-[color:var(--code-string)]">{strMatch[1]}</span>);
           parts.push(<span key={key++}>{strMatch[2]}</span>);
           return <div key={i}>{parts}</div>;
         }
         const numMatch = rest.match(/^(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(,?\s*)$/);
         if (numMatch) {
-          parts.push(<span key={key++} className="text-amber-400">{numMatch[1]}</span>);
+          parts.push(<span key={key++} className="text-[color:var(--code-number)]">{numMatch[1]}</span>);
           parts.push(<span key={key++}>{numMatch[2]}</span>);
           return <div key={i}>{parts}</div>;
         }
         const boolMatch = rest.match(/^(true|false|null)(,?\s*)$/);
         if (boolMatch) {
-          parts.push(<span key={key++} className="text-purple-400">{boolMatch[1]}</span>);
+          parts.push(<span key={key++} className="text-[color:var(--code-literal)]">{boolMatch[1]}</span>);
           parts.push(<span key={key++}>{boolMatch[2]}</span>);
           return <div key={i}>{parts}</div>;
         }
@@ -1411,7 +1438,7 @@ function PrettyView({ format, text }: { format: "json" | "yaml"; text: string })
         return <div key={i}>{parts}</div>;
       })
     : lines.map((line, i) => {
-        // YAML: "---" in muted, comments in muted, keys before ":" in muted, numbers in amber, strings in signal
+        // YAML: same palette as JSON — dimmed keys, neutral values, colour only for numbers and literals.
         if (/^---\s*$/.test(line)) return <div key={i} className="text-muted-foreground/40">{line}</div>;
         if (/^\s*#/.test(line)) return <div key={i} className="text-muted-foreground/50">{line}</div>;
         const kvMatch = line.match(/^(\s*)([\w.-]+)(:)(.*)$/);
@@ -1419,11 +1446,11 @@ function PrettyView({ format, text }: { format: "json" | "yaml"; text: string })
           const [, indent, k, colon, val = ""] = kvMatch;
           const valTrimmed = val.trim();
           const numMatch = valTrimmed.match(/^-?\d+(?:\.\d+)?$/);
-          const valClass = numMatch ? "text-amber-400" : valTrimmed ? "text-signal" : "";
+          const valClass = numMatch ? "text-[color:var(--code-number)]" : /^(true|false|null|~|yes|no)$/i.test(valTrimmed) ? "text-[color:var(--code-literal)]" : valTrimmed ? "text-[color:var(--code-string)]" : "";
           return (
             <div key={i}>
               <span>{indent}</span>
-              <span className="text-foreground/70">{k}</span>
+              <span className="text-[color:var(--code-key)]">{k}</span>
               <span>{colon}</span>
               <span className={valClass}>{val}</span>
             </div>
@@ -1844,16 +1871,19 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
 
   const [openFiles, setOpenFiles] = useState<Set<string>>(() => new Set(files.map((f) => f.path)));
   const [cursor, setCursor] = useState(0);
-  const [allCollapsed, setAllCollapsed] = useState(false);
+  const allCollapsed = openFiles.size === 0;
   const rowRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const filesRef = useRef(files);
   filesRef.current = files;
-  const stateRef = useRef({ cursor, openFiles, allCollapsed });
-  stateRef.current = { cursor, openFiles, allCollapsed };
+  const stateRef = useRef({ cursor, openFiles });
+  stateRef.current = { cursor, openFiles };
 
   const toggle = useCallback((path: string) =>
     setOpenFiles((prev) => { const s = new Set(prev); s.has(path) ? s.delete(path) : s.add(path); return s; }), []);
+  // Any file open → collapse all; none open → expand all.
+  const toggleAll = useCallback(() =>
+    setOpenFiles((prev) => (prev.size > 0 ? new Set() : new Set(filesRef.current.map((f) => f.path)))), []);
 
   const onKey = useCallback((e: KeyboardEvent, inSearch: boolean) => {
     if (inSearch) return;
@@ -1892,17 +1922,11 @@ function GitDiffView({ raw, isLast }: { raw: string; isLast?: boolean }) {
       collapsedSummary={<><span className="text-signal">+{totalAdd}</span><span className="text-alarm">-{totalDel}</span><span className="text-muted-foreground/50">{files.length} file{files.length !== 1 ? "s" : ""}</span></>}
       headerMeta={<><span className="text-signal">+{totalAdd}</span><span className="text-alarm">-{totalDel}</span><span className="text-muted-foreground/50">{files.length} file{files.length !== 1 ? "s" : ""}</span></>}
       allCollapsed={allCollapsed}
-      onToggleAll={useCallback(() => {
-        setAllCollapsed((c) => {
-          if (!c) setOpenFiles(new Set());
-          else setOpenFiles(new Set(filesRef.current.map((f) => f.path)));
-          return !c;
-        });
-      }, [])}
+      onToggleAll={toggleAll}
       onKey={onKey}
     >
       {(search: string) => (
-        <div className="flex-1 overflow-y-auto divide-y divide-border/30">
+        <div data-pager-scroll className="flex-1 overflow-y-auto divide-y divide-border/30">
           {files.map((f, i) => {
             const hits = search ? countMatches(f.raw.slice(Math.max(0, f.raw.indexOf("\n@@"))), search) : 0;
             return (
@@ -2541,7 +2565,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
         brightBlack: "#6e7681", brightRed: "#ffa198", brightGreen: "#56d364",
         brightYellow: "#e3b341", brightBlue: "#79c0ff", brightMagenta: "#d2a8ff",
         brightCyan: "#56d4dd", brightWhite: "#f0f6fc",
-        cursor: "#58a6ff", selectionBackground: "#264f78",
+        cursor: "#58a6ff",
       },
       allowProposedApi: true,
       scrollback: 10000,
@@ -2553,6 +2577,9 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     term.unicode.activeVersion = '11';
     term.loadAddon(new ImageAddon());
     term.open(el);
+    attachGpuRenderer(term);
+    const kittyKeys = attachKittyKeyboard(term, (data) => sendRaw(sessionId, data));
+    const stopSelectionSync = syncTerminalSelection(term);
     tuiFitRef.current = () => { fit.fit(); resizePty(sessionId, term.cols, term.rows); };
     // Ensure pane ref is captured (may not be set yet if this is first mount)
     if (!tuiPaneRef.current) {
@@ -2630,12 +2657,17 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
       if (tabId !== sessionId) return;
       term.write(new TextEncoder().encode(data), () => updateHeight());
     });
+    // Resumed full-screen program (the UI restarted while it ran): now that this
+    // terminal listens, have it repaint.
+    if (takeRedraw(sessionId)) shell.redraw(sessionId);
     return () => {
+      kittyKeys.dispose();
       off();
       offAlt();
       ro.disconnect();
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       tuiFitRef.current = null;
+      stopSelectionSync();
       term.dispose();
     };
   // Only create once when isTuiActive first becomes true

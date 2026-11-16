@@ -144,7 +144,10 @@ free_port() {
   fi
   [ -n "$pids" ] && kill $pids 2>/dev/null || true
 }
-for p in 7878 7880 7881; do free_port "$p"; done
+# The dev daemon gets its own port: 7878 belongs to the production app's daemon, which
+# keeps running (with your real sessions) after the app closes — don't kill that one.
+export DAIMON_PORT="${DAIMON_PORT:-7877}"
+for p in "$DAIMON_PORT" 7880 7881; do free_port "$p"; done
 [ "$WIN_NATIVE" = 1 ] && win_stop
 
 # ── Cleanup on exit ───────────────────────────────────────────────────────────
@@ -168,7 +171,9 @@ trap cleanup INT TERM EXIT
 # ── 1. Rust pty-daemon (build first so compile errors stop the script) ───────
 log "building Rust workspace..."
 cargo build --manifest-path "$ROOT/Cargo.toml" -p pty-daemon -p daimon
-log "starting pty-daemon..."
+# Clients need the daemon's token: the app passes it to the window, Vite to a browser.
+export DAIMON_TOKEN="$("$ROOT/target/debug/pty-daemon" --token)"
+log "starting pty-daemon on :$DAIMON_PORT..."
 cargo run -q -p pty-daemon --manifest-path "$ROOT/Cargo.toml" &
 PIDS+=($!)
 
@@ -191,9 +196,9 @@ if [ "$WIN_NATIVE" = 1 ]; then
     log "building blur helper (Windows)..."
     win_build_blur
     log "launching Electrobun app (Windows)..."
-    # Windows reaches the daemon (:7878) and Vite (:7881) through WSL's localhost forwarding.
+    # Windows reaches the daemon (:$DAIMON_PORT) and Vite (:7881) through WSL's localhost forwarding.
     # (/p = translate the WSL path to a Windows path.)
-    export WSLENV="${WSLENV:+$WSLENV:}DAIMON_TRANSPARENT:DAIMON_BACKDROP:DAIMON_BLUR:DAIMON_BACKDROP_DLL/p"
+    export WSLENV="${WSLENV:+$WSLENV:}DAIMON_TRANSPARENT:DAIMON_BACKDROP:DAIMON_BLUR:DAIMON_BACKDROP_DLL/p:DAIMON_TOKEN:DAIMON_PORT"
     (cd "$WIN_STAGE/app" && exec ../tools/bun.exe node_modules/electrobun/bin/electrobun.cjs run </dev/null) &
     PIDS+=($!)
   else

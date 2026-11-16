@@ -8,7 +8,7 @@ import { HistoryPanel } from "@/components/daimon/HistoryPanel";
 import { ContextSwitcher } from "@/components/daimon/ContextSwitcher";
 import { XTermPanel, type XTermHandle } from "@/components/daimon/XTermPanel";
 import { run, sendRaw, resizePty, notifyAltScreen, onAltScreenChange, onTuiChange, STREAMING_INTERACTIVE_RE, isStreamingSession, isWarpified, abandonRun, setNotifConfig, type Block, type State } from "@/lib/daimon/shell";
-import { shell } from "@/lib/daimon/rpc";
+import { shell, type AttachInfo } from "@/lib/daimon/rpc";
 import { displayPath } from "@/lib/daimon/world";
 import kubernetesIcon from "@/assets/kubernetes-icon.svg";
 import { LandingPage } from "@/components/daimon/LandingPage";
@@ -269,12 +269,14 @@ function Daimon() {
         }));
         setSessions(sessionsWithBlocks);
         setActiveId(sessionsWithBlocks[0]!.id);
+        void reattach(sessionsWithBlocks.map((s) => s.id));
       } else {
         // First launch: load blocks for the default session
         const sid = sessions[0]!.id;
         const blockRows = await shell.blockList(sid, 500).catch(() => []);
         const blocks = decodeBlocks(blockRows);
         setSessions(prev => prev.map((s, i) => i === 0 ? { ...s, history, historyTs, blocks } : s));
+        void reattach([sid]);
       }
 
       if (savedTheme === "dracula" || savedTheme === "light") {
@@ -431,6 +433,46 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions.map((s) => s.id).join(",")]);
 
+  // ── Session persistence ─────────────────────────────────────────────────────
+  // The daemon outlives the app, so a restored tab may still have its shell — maybe
+  // mid-command. Reattach: take over the shell's current context (cwd, git …) and show
+  // a running command as a live block again. Declared after the TUI listeners above so
+  // those exist before a resumed full-screen program announces itself.
+  const [pendingResumes, setPendingResumes] = useState<[string, AttachInfo][]>([]);
+  const reattach = async (ids: string[]) => {
+    const infos = await Promise.all(ids.map((id) =>
+      shell.attach(id).then((info) => [id, info] as [string, AttachInfo]).catch(() => null)));
+    const live = infos.filter((x): x is [string, AttachInfo] => !!x && x[1].exists);
+    if (!live.length) return;
+    setSessions((prev) => prev.map((s) => {
+      const info = live.find(([id]) => id === s.id)?.[1];
+      if (!info?.context) return s;
+      try {
+        const ctx = JSON.parse(info.context) as { pwd?: string; gitBranch?: string; k8sContext?: string };
+        return {
+          ...s,
+          state: {
+            ...s.state,
+            ...(ctx.pwd ? { cwd: ctx.pwd.split("/").filter(Boolean) } : {}),
+            ...(ctx.gitBranch ? { gitBranch: ctx.gitBranch } : {}),
+            ...(ctx.k8sContext ? { ctx: { ...s.state.ctx, name: ctx.k8sContext } } : {}),
+          },
+        };
+      } catch { return s; }
+    }));
+    setPendingResumes(live.filter(([, info]) => info.running));
+  };
+  useEffect(() => {
+    if (!pendingResumes.length) return;
+    setPendingResumes([]);
+    for (const [id, info] of pendingResumes) {
+      const sess = sessions.find((s) => s.id === id);
+      if (!sess || sess.blocks.some((b) => b.pending)) continue;
+      void runBlock(id, info.command ?? "(running command)", sess.state, info);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingResumes]);
+
   useEffect(() => {
     setAltScreenActive(false);
     return onAltScreenChange(activeId, setAltScreenActive);
@@ -467,13 +509,60 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedPane, splitSessionId]);
 
-  useEffect(() => {
-    window.addEventListener("focus", () => focusComposer());
-    return () => window.removeEventListener("focus", () => focusComposer());
-  }, []);
-
   const focusedSidRef = useRef(activeId);
   focusedSidRef.current = focusedPane === "right" && splitSessionId ? splitSessionId : activeId;
+
+  /** Return focus to the command input of the last active pane once the UI has re-rendered. */
+  const refocusComposer = () =>
+    requestAnimationFrame(() => setTimeout(() => {
+      // Don't steal focus from a text field that something else just focused (e.g. session rename).
+      const ae = document.activeElement as HTMLElement | null;
+      const editable = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
+      if (editable && !ae.closest("[data-pane]")) return;
+      focusComposer(focusedSidRef.current);
+    }, 0));
+
+  // Any modal/overlay closing → back to the command input.
+  const anyModalOpen = paletteOpen || keysModalOpen || settingsOpen || globalSearchOpen || searchOpen || historyOpen;
+  const prevModalOpenRef = useRef(false);
+
+  // Window restored / refocused (un-minimize, alt-tab back): focus the last active pane's
+  // command input — unless a modal is open or the browser already restored focus to a
+  // text field (e.g. a pager search, rename input).
+  const anyModalOpenRef = useRef(anyModalOpen);
+  anyModalOpenRef.current = anyModalOpen;
+  useEffect(() => {
+    const onReturn = () => {
+      if (document.visibilityState === "hidden") return;
+      requestAnimationFrame(() => {
+        if (anyModalOpenRef.current) return;
+        const ae = document.activeElement as HTMLElement | null;
+        // Another text field kept focus (pager search, rename…) — leave it. The composer
+        // itself doesn't count: it's often still activeElement while the webview had no
+        // keyboard focus, and re-focusing it is what puts the caret back.
+        const otherField = ae && !ae.hasAttribute("data-composer") &&
+          (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
+        if (otherField) return;
+        // A fullscreen pager owns the keyboard (j/k, q…); the composer under it must not grab focus.
+        if (document.querySelector(".pager-overlay")) return;
+        focusComposer(focusedSidRef.current);
+      });
+    };
+    window.addEventListener("focus", onReturn);
+    window.addEventListener("daimon:host-focus", onReturn); // sent by the native host on window activation
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      window.removeEventListener("focus", onReturn);
+      window.removeEventListener("daimon:host-focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (prevModalOpenRef.current && !anyModalOpen) refocusComposer();
+    prevModalOpenRef.current = anyModalOpen;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyModalOpen]);
 
   useEffect(() => {
     const bump = (e: Event, d: number) => {
@@ -489,7 +578,7 @@ function Daimon() {
     const onClose = (e: Event) => {
       bump(e, -1);
       // Composer is unhidden on the next render — focus it once that has painted.
-      requestAnimationFrame(() => setTimeout(() => focusComposer(focusedSidRef.current), 0));
+      refocusComposer();
     };
     window.addEventListener("pager-open", onOpen);
     window.addEventListener("pager-close", onClose);
@@ -729,18 +818,26 @@ function Daimon() {
     const newHistoryTs = isDup ? sess.historyTs : [...sess.historyTs, ts];
     if (!isDup) shell.historyAdd(cmd, ts).catch(() => {});
     updateSession(sessionId, { history: newHistory, historyTs: newHistoryTs });
+    await runBlock(sessionId, cmd, sess.state);
+  };
+
+  /**
+   * Run `cmd` as a new block in a session — or, with `resume`, show a command that is
+   * already running in the daemon (the UI restarted while it ran) as that block.
+   */
+  const runBlock = async (sessionId: string, cmd: string, state: State, resume?: AttachInfo) => {
     const pendingId = Math.random().toString(36).slice(2);
     setSessions((prev) => prev.map((s) => s.id === sessionId ? {
       ...s,
       blocks: [...s.blocks, { id: pendingId, input: cmd, cwd: s.state.cwd, ctx: s.state.ctx.name, at: now(), ms: 0, code: 0, out: [], pending: true }],
     } : s));
 
-    const runPromise = run(cmd, sess.state, sessionId, (updated) => {
+    const runPromise = run(cmd, state, sessionId, (updated) => {
       setSessions((prev) => prev.map((s) => s.id === sessionId ? {
         ...s,
         blocks: s.blocks.map((x) => x.id === pendingId ? { ...updated, id: pendingId } : x),
       } : s));
-    });
+    }, resume);
     window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } }));
     const { block, next, clear } = await runPromise;
     setSessions((prev) => prev.map((s) => {
@@ -1239,7 +1336,7 @@ function Daimon() {
             >
               {presentationMode ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
             </button>
-            <ContextSwitcher ctxName={active.state.ctx.name} onPick={pickCtx} forceOpen={ctxSwitcherOpen} forceClose={ctxSwitcherClose} onOpenChange={(o) => { ctxSwitcherIsOpen.current = o; }} />
+            <ContextSwitcher ctxName={active.state.ctx.name} onPick={pickCtx} forceOpen={ctxSwitcherOpen} forceClose={ctxSwitcherClose} onOpenChange={(o) => { ctxSwitcherIsOpen.current = o; if (!o) refocusComposer(); }} />
           </div>
         </header>
 

@@ -1,5 +1,5 @@
 import { shell } from "./rpc";
-import type { ShellContext } from "./rpc";
+import type { AttachInfo, ShellContext } from "./rpc";
 
 export type LsEntry = {
   perms: string;     // e.g. "drwxr-xr-x"
@@ -311,6 +311,49 @@ export function normalizeTerminal(raw: string): string {
   return raw.replace(/\r+\n/g, "\n").split("\n").map(renderTermLine).join("\n");
 }
 
+/**
+ * Strict YAML sniffing for command output. Progress/log prose ("remote: Resolving deltas: 100%",
+ * "Total 36 (delta 26)") must stay plain text — only treat it as YAML when nearly every line is
+ * structurally YAML: `key: value` (key without spaces), `- item`, `---`, or an indented continuation.
+ */
+export function looksLikeYaml(text: string): boolean {
+  const lines = text.split("\n").filter((l) => l.trim() && !/^\s*#/.test(l));
+  if (lines.length < 3) return false;
+  const keyRe = /^(\s*)(?:- )?(["']?)[\w./-]+\2:(?:\s+(.*))?$/;
+  const itemRe = /^\s*- \S/;
+  const docRe = /^(?:---|\.\.\.)\s*$/;
+  // Keys seen per indent level within the current mapping. A mapping can't repeat a key, so
+  // "remote: …" / "remote: …" or "error: …" / "error: …" is prose, not YAML.
+  const seen = new Map<number, Set<string>>();
+  const resetFrom = (indent: number) => { for (const k of [...seen.keys()]) if (k >= indent) seen.delete(k); };
+  let keys = 0, structural = 0;
+  for (const l of lines) {
+    if (docRe.test(l)) { seen.clear(); structural++; continue; }
+    const m = keyRe.exec(l);
+    if (m) {
+      const value = m[3] ?? "";
+      // Unquoted values can't contain ": " in YAML — that's prose like "remote: Resolving deltas: 100%".
+      if (!/^["'{[|>]/.test(value) && /:\s/.test(value)) return false;
+      const isItem = /^\s*- /.test(l);
+      const indent = m[1]!.length + (isItem ? 2 : 0);
+      if (isItem) resetFrom(indent);       // "- key:" starts a fresh mapping
+      else resetFrom(indent + 1);          // leaving deeper mappings
+      const name = l.slice(0, l.indexOf(":")).replace(/^\s*(?:- )?["']?/, "").replace(/["']$/, "");
+      const set = seen.get(indent) ?? new Set<string>();
+      if (set.has(name)) return false;
+      set.add(name);
+      seen.set(indent, set);
+      keys++; structural++;
+    } else if (itemRe.test(l)) {
+      resetFrom(l.search(/\S/));
+      structural++;
+    } else if (/^\s+\S/.test(l)) {
+      structural++;
+    }
+  }
+  return keys >= 2 && structural / lines.length >= 0.9;
+}
+
 // OSC 1337 imgcat: ESC ] 1337 ; File=inline=1[;...] : <base64> BEL
 const OSC1337_RE = /\x1b\]1337;File=[^\x07\x1b]*:([A-Za-z0-9+/=]+)(?:\x07|\x1b\\)/g;
 
@@ -464,16 +507,7 @@ function parse(rawText: string): Out[] {
     return [{ kind: "gitdiff", raw: text }];
   }
 
-  // YAML detection: "---" separator, "- " list items, or "key: value" pattern, at least 3 lines
-  if (lines.length >= 3) {
-    const yamlKeyRe = /^\s*[\w.-]+:\s/;
-    const yamlListRe = /^\s*- /;
-    const yamlDocRe = /^---\s*$/;
-    const yamlLines = lines.filter((l) => yamlKeyRe.test(l) || yamlListRe.test(l) || yamlDocRe.test(l));
-    if (yamlLines.length >= 3 || (lines[0]?.trim() === "---" && yamlLines.length >= 2)) {
-      return [{ kind: "pretty", format: "yaml", text }];
-    }
-  }
+  if (looksLikeYaml(text)) return [{ kind: "pretty", format: "yaml", text }];
 
   // Strip uniform leading whitespace (e.g. git branch `  branch-name` padding)
   const nonEmpty = lines.filter((l) => l.trim().length > 0);
@@ -566,6 +600,15 @@ function ensureReady(tabId: string): Promise<void> {
   return p;
 }
 
+// Tabs whose full-screen program was resumed and should repaint once the inline
+// terminal is mounted (BlockView calls takeRedraw).
+const redrawPending = new Set<string>();
+
+/** True once per resumed full-screen program: the caller should ask it to repaint. */
+export function takeRedraw(tabId: string): boolean {
+  return redrawPending.delete(tabId);
+}
+
 export function sendRaw(tabId: string, data: string) {
   shell.write(tabId, data).catch(() => {});
 }
@@ -578,23 +621,25 @@ export async function run(
   raw: string,
   state: State,
   tabId: string,
-  onProgress: (block: Block) => void
+  onProgress: (block: Block) => void,
+  /** Pick up a command that's already running in the daemon (after the UI restarted). */
+  resume?: AttachInfo,
 ): Promise<{ block: Block; next: State; clear?: boolean }> {
   const input = raw.trim();
 
-  if (!input) {
+  if (!input && !resume) {
     const block: Block = { id: Math.random().toString(36).slice(2), input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: 0, code: 0, out: [] };
     return { block, next: state };
   }
 
-  if (input === "clear") {
+  if (!resume && input === "clear") {
     const block: Block = { id: Math.random().toString(36).slice(2), input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: 0, code: 0, out: [] };
     return { block, next: state, clear: true };
   }
 
   // Git commands — intercepted and rendered with rich UI
   const cwdStr = "/" + state.cwd.join("/");
-  if (/^git\s+status(\s|$)/.test(input)) {
+  if (!resume && /^git\s+status(\s|$)/.test(input)) {
     const t = Date.now();
     const id = Math.random().toString(36).slice(2);
     try {
@@ -605,7 +650,7 @@ export async function run(
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
-  if (/^git\s+log(\s|$)/.test(input)) {
+  if (!resume && /^git\s+log(\s|$)/.test(input)) {
     const t = Date.now();
     const id = Math.random().toString(36).slice(2);
     try {
@@ -616,7 +661,7 @@ export async function run(
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
-  if (/^git\s+branch(\s+(-v|-vv|--list|-l))*\s*$/.test(input)) {
+  if (!resume && /^git\s+branch(\s+(-v|-vv|--list|-l))*\s*$/.test(input)) {
     const t = Date.now();
     const id = Math.random().toString(36).slice(2);
     try {
@@ -627,7 +672,7 @@ export async function run(
       return { block: { id, input, cwd: state.cwd, ctx: state.ctx.name, at: now(), ms: Date.now() - t, code: 1, out: [{ kind: "lines", lines: ["not a git repository"], tone: "bad" }] }, next: state };
     }
   }
-  if (/^git\s+(--no-pager\s+)?diff(\s|$)/.test(input)) {
+  if (!resume && /^git\s+(--no-pager\s+)?diff(\s|$)/.test(input)) {
     const t = Date.now();
     const id = Math.random().toString(36).slice(2);
     try {
@@ -646,7 +691,7 @@ export async function run(
   const noPagerRewrite = input.replace(/^(git)\s+(diff|show|log|blame)(\s|$)/, "git --no-pager $2$3");
   const effectiveInput = noPagerRewrite !== input ? noPagerRewrite : input;
 
-  const t0 = Date.now();
+  const t0 = resume?.startedAt || Date.now();
   let normalBuf = "";
   let exitCode = 0;
   let finalCtx: ShellContext | null = null;
@@ -668,8 +713,8 @@ export async function run(
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let done = false;
-  let commandWritten = false;
-  let commandStarted = false;
+  let commandWritten = !!resume;
+  let commandStarted = !!resume;
   // Warpify (ssh only): quiet-period debounce → inject OSC 133 bootstrap → confirm on first remote Prompt.
   // ponytail: timing heuristic. Ceiling: a slow link or a >600ms-gapped MOTD banner can
   // trip the injection early; the retry + marker-confirm cover the common cases. Swap to a
@@ -702,6 +747,21 @@ export async function run(
       onProgress({ ...pendingBlock, ms: Date.now() - t0, out: (stripped || hasImg) ? parse(forParse) : [], pending: true });
     }, 80);
   };
+
+  // Resuming: start from what the daemon kept. A full-screen program gets the inline
+  // terminal (with its modes restored) and is asked to repaint once that's mounted.
+  const resumedAlt = !!resume?.altScreen;
+  if (resume) {
+    appendReplay(tabId, resume.output);
+    if (resumedAlt) { notifyAltScreen(tabId, true); redrawPending.add(tabId); }
+    if (resumedAlt || TUI_RE.test(resume.output)) {
+      detectedTUI = true;
+      notifyTui(tabId, true);
+    } else if (resume.output) {
+      normalBuf = resume.output.replace(/\x1b\[\?[0-9;]*[hlsur]/g, "");
+      emitProgress();
+    }
+  }
 
   return new Promise<{ block: Block; next: State; clear?: boolean }>((resolve) => {
     globalOutputOff?.(); globalContextOff?.(); globalExitOff?.(); globalCommandStartOff?.();
@@ -793,8 +853,9 @@ export async function run(
 
       if (isInteractive || detectedTUI) {
         notifyTui(tabId, false);
-        if (isInteractive) notifyAltScreen(tabId, false);
+        if (isInteractive || resumedAlt) notifyAltScreen(tabId, false);
       }
+      redrawPending.delete(tabId);
       // keepSession: warpify-confirm resolve — leave ssh streaming+warpified state set so
       // later remote commands keep routing as blocks over the same live PTY.
       if (isStreamingInteractive && !keepSession) { inStreamingSessionMap.delete(tabId); notifyWarpify(tabId, false); }
@@ -834,6 +895,7 @@ export async function run(
     }
 
     activeCleanups.set(tabId, cleanup);
-    ensureReady(tabId).then(() => { commandWritten = true; shell.write(tabId, effectiveInput + "\n").catch(() => cleanup()); });
+    if (resume) return; // already running — nothing to send
+    ensureReady(tabId).then(() => { commandWritten = true; shell.writeCommand(tabId, effectiveInput + "\n", input).catch(() => cleanup()); });
   });
 }
