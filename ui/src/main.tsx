@@ -33,6 +33,21 @@ import { applyGlass, loadGlass } from "./lib/daimon/appearance";
   }
 }
 
+// ?frame=custom: the window has no native title bar — the page draws it (TitleBar.tsx).
+{
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("frame") === "custom") {
+    sessionStorage.setItem("daimon-custom-frame", "1");
+    url.searchParams.delete("frame");
+    history.replaceState(history.state, "", url);
+  }
+  const root = document.documentElement;
+  if (sessionStorage.getItem("daimon-custom-frame") === "1") root.classList.add("custom-frame");
+  // macOS already has overlay scrollbars that stay out of the way; everywhere else the
+  // native ones are replaced with themed ones (styles.css).
+  if (!/Mac/.test(navigator.platform)) root.classList.add("themed-scrollbars");
+}
+
 applyGlass(loadGlass());
 
 const router = getRouter();

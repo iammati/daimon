@@ -7,6 +7,7 @@ import {
 import { enablePinchZoom } from "./macMagnification";
 import { enableMovableByBackground } from "./macWindowDrag";
 import { focusWebview } from "./winFocus";
+import { prepareCustomFrame, startTopResize } from "./winFrame";
 
 // ── pty-daemon ────────────────────────────────────────────────────────────────
 // Dev: dev.sh runs it. Prod: find the running daemon or start one (see daemon.ts).
@@ -32,6 +33,8 @@ const query = [
   daemon && `daimon_port=${daemon.port}`,
   nativeTransparent && "transparent=1",
   nativeTransparent && isWindows && (variableBlur ? "blur=variable" : "blur=steps"),
+  // The page draws the title bar (drag strip + minimize / maximize / close): see winFrame.ts.
+  isWindows && "frame=custom",
 ].filter(Boolean);
 const frontendUrl = query.length ? `${baseUrl}?${query.join("&")}` : baseUrl;
 
@@ -84,11 +87,10 @@ const win = new BrowserWindow({
   frame: { width: 1280, height: 800, x: 100, y: 100 },
   // See-through window where supported; the UI paints its own translucent background.
   transparent: nativeTransparent,
-  // Custom HTML titlebar: hide native title bar, keep traffic lights inset.
-  ...(process.platform === "darwin" && {
-    titleBarStyle: "hiddenInset" as const,
-    trafficLightOffset: { x: 16, y: 14 },
-  }),
+  // Custom HTML titlebar: hide the native title bar. macOS keeps its traffic lights
+  // inset; Windows keeps the resizable frame and the page draws the window buttons.
+  ...((process.platform === "darwin" || isWindows) && { titleBarStyle: "hiddenInset" as const }),
+  ...(process.platform === "darwin" && { trafficLightOffset: { x: 16, y: 14 } }),
 });
 
 enablePinchZoom(); // macOS only
@@ -105,8 +107,45 @@ win.on("focus", () => {
   }, 30); // let the OS finish activation (it focuses the frame window last)
 });
 
+// Messages from the page: window.__electrobunSendToHost({ type, ... }).
+type HostMessage = { type?: string; blur?: unknown; action?: unknown };
+const hostMessageHandlers: ((msg: HostMessage) => void)[] = [];
+(win.webview as unknown as { on(name: string, handler: (event: unknown) => void): void }).on(
+  "host-message",
+  (event) => {
+    const msg = (event as { data?: { detail?: unknown } }).data?.detail as HostMessage | undefined;
+    if (msg) for (const handle of hostMessageHandlers) handle(msg);
+  },
+);
+
+// Windows: the page's title bar. Its buttons arrive as { type: "window", action }, and
+// it is told when the window is (un)maximized so it can swap the maximize/restore icon.
+if (isWindows) {
+  if (!prepareCustomFrame(win.ptr, nativeTransparent)) console.warn("[main] couldn't set up the custom window frame");
+  let maximized: boolean | null = null;
+  const reportState = (force = false) => {
+    const now = win.isMaximized();
+    if (!force && now === maximized) return;
+    maximized = now;
+    win.webview.executeJavascript(
+      `window.dispatchEvent(new CustomEvent("daimon:window-state", { detail: { maximized: ${now} } }))`,
+    );
+  };
+  win.on("resize", () => reportState());
+  hostMessageHandlers.push((msg) => {
+    if (msg.type !== "window") return;
+    switch (msg.action) {
+      case "minimize": win.minimize(); break;
+      case "maximize": if (win.isMaximized()) win.unmaximize(); else win.maximize(); break;
+      case "close": win.close(); break;
+      case "resize-top": startTopResize(win.ptr); break;
+      case "state": reportState(true); break;
+    }
+  });
+}
+
 // Windows: blur the desktop behind the window. The UI reports the blur slider
-// through window.__electrobunSendToHost({ type: "glass", blur }).
+// as { type: "glass", blur }.
 if (isWindows && nativeTransparent) {
   const hwnd = win.ptr;
   if (prepareWindow(hwnd)) {
@@ -134,13 +173,9 @@ if (isWindows && nativeTransparent) {
     // DAIMON_BLUR=<px> pins the blur radius and ignores the slider (handy for comparing).
     const pinned = process.env.DAIMON_BLUR ? Number(process.env.DAIMON_BLUR) : NaN;
     apply(Number.isFinite(pinned) ? pinned : DEFAULT_BLUR);
-    (win.webview as unknown as { on(name: string, handler: (event: unknown) => void): void }).on(
-      "host-message",
-      (event) => {
-        const msg = (event as { data?: { detail?: unknown } }).data?.detail as { type?: string; blur?: unknown } | undefined;
-        if (!Number.isFinite(pinned) && msg?.type === "glass" && typeof msg.blur === "number") apply(msg.blur);
-      },
-    );
+    hostMessageHandlers.push((msg) => {
+      if (!Number.isFinite(pinned) && msg.type === "glass" && typeof msg.blur === "number") apply(msg.blur);
+    });
   } else {
     console.warn("[main] couldn't get a usable window handle — desktop blur disabled");
   }

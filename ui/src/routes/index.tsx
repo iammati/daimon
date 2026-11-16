@@ -17,7 +17,10 @@ import { GlobalSearch } from "@/components/daimon/GlobalSearch";
 import { HeaderExtensionSlot, OpenStackBadge } from "@/components/daimon/HeaderExtension";
 import { KeyboardShortcutsModal } from "@/components/daimon/KeyboardShortcutsModal";
 import { SettingsModal } from "@/components/daimon/SettingsModal";
-import { PowerlineStatus } from "@/components/daimon/PowerlineStatus";const TITLE = "daimon — a terminal for Converged Cloud operators";
+import { PowerlineStatus } from "@/components/daimon/PowerlineStatus";
+import { TitleBar } from "@/components/daimon/TitleBar";
+
+const TITLE = "daimon — a terminal for Converged Cloud operators";
 const DESC =
   "daimon is a light, block-based terminal: ghost autocomplete, folder-aware suggestions, and a kube context switcher built for Converged Cloud regions.";
 
@@ -1048,8 +1051,7 @@ function Daimon() {
     <div className="flex flex-col h-screen bg-transparent text-foreground overflow-hidden">
       <Toaster position="top-center" />
 
-      {/* Titlebar spacer — 36px empty zone for native movableByWindowBackground drag */}
-      <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: 36, zIndex: 9999, WebkitUserSelect: "none", userSelect: "none" } as React.CSSProperties} />
+      <TitleBar />
 
       <div className="flex flex-1 overflow-hidden">
       {/* Sidebar */}
