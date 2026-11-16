@@ -197,6 +197,13 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
                                 let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
                             });
                         }
+                        Ok(SessionCommand::LinkPreview { req_id, url }) => {
+                            let tx = client_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = crate::link_preview::link_preview(&url);
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
+                            });
+                        }
                         // ── Store commands ────────────────────────────────────────────
                         Ok(SessionCommand::HistoryAdd { req_id, cmd, ts }) => {
                             let tx = client_tx.clone();

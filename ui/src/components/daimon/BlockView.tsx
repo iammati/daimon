@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Keys } from "./Kbd";
 import { MarkdownDiffView, MarkdownModeToggle } from "./MarkdownDiffView";
 import { isMarkdownPath, useMarkdownRendered, toggleMarkdownRendered } from "@/lib/daimon/markdownMode";
+import { fetchLinkPreview, previewUrls, useLinkPreviewsEnabled, type LinkPreview } from "@/lib/daimon/linkPreview";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
 import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, onAltScreenChange, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
@@ -71,6 +72,11 @@ function stripHtml(html: string): string {
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 }
 
+/** The placeholder for a hidden secret, styled like the active presentation-mode (eye-off) button. */
+function RedactedMark() {
+  return <mark className="rounded-[3px] bg-amber-400/10 px-0.5 italic text-amber-400">[redacted by daimon]</mark>;
+}
+
 function redactNode(text: string): React.ReactNode {
   const parts: React.ReactNode[] = [];
   let last = 0;
@@ -82,7 +88,7 @@ function redactNode(text: string): React.ReactNode {
     if (match.index > last) parts.push(text.slice(last, match.index));
     if (prefix) parts.push(prefix);
     parts.push(
-      <mark key={key++} className="bg-amber-400/25 text-amber-300 rounded-[3px] px-0.5 not-italic">[redacted by daimon]</mark>
+      <RedactedMark key={key++} />
     );
     last = match.index + match[0].length;
   }
@@ -2508,7 +2514,7 @@ function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
               // patterns (NAME=value) are broken up by the ansi <span> tags, so redacting the raw
               // html misses them — matching on plain text catches them. Colors are dropped here,
               // which is an acceptable trade to guarantee no secret leaks on a shared screen.
-              ? <span>{redact(stripHtml(html))}</span>
+              ? <span>{redactNode(stripHtml(html))}</span>
               : <AnsiHtml html={html} />
           }
         </pre>
@@ -2606,7 +2612,7 @@ function OutView({ out: rawOut, input = "", ctx = "", cwd, isLast = false, onSea
         {out.pairs.map(([k, v]) => (
           <React.Fragment key={k}>
             <dt className="text-muted-foreground/60">{k}</dt>
-            <dd className="text-foreground">{v}</dd>
+            <dd className="text-foreground">{v === "[redacted by daimon]" ? <RedactedMark /> : v}</dd>
           </React.Fragment>
         ))}
       </dl>
@@ -2638,6 +2644,72 @@ const COLLAPSED_MAX_PX = 320;
 
 /** Terminal background. The WebGPU surface is opaque, so this is a solid color. */
 const TUI_BG = "#0d1117";
+
+/** Plain text of the outputs that can carry URLs (raw lines and ANSI html, tags and entities dropped). */
+function outputText(out: Out[]): string {
+  return out.map((o) =>
+    o.kind === "lines" ? o.lines.join("\n")
+    : o.kind === "ansi" ? o.html.replace(/<[^>]+>/g, "").replace(/&(amp|lt|gt|quot|#39);/g, (_, e: string) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[e]!)
+    : "",
+  ).join("\n");
+}
+
+/** Open Graph cards under a finished block for the URLs in its output (Settings → Terminal → Link previews). */
+function LinkPreviews({ out }: { out: Out[] }) {
+  const pm = useContext(PresentationModeContext);
+  const enabled = useLinkPreviewsEnabled();
+  const urls = useMemo(() => (enabled && !pm ? previewUrls(outputText(out)) : []), [out, enabled, pm]);
+  const [previews, setPreviews] = useState<LinkPreview[]>([]);
+  useEffect(() => {
+    let live = true;
+    setPreviews([]);
+    if (urls.length === 0) return;
+    Promise.all(urls.map(fetchLinkPreview)).then((ps) => {
+      if (live) setPreviews(ps.filter((p): p is LinkPreview => !!p && !!(p.title || p.description)));
+    });
+    return () => { live = false; };
+  }, [urls.join("\n")]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (previews.length === 0) return null;
+  return (
+    <div className="mt-3 flex flex-col gap-2">
+      {previews.map((p) => <LinkCard key={p.url} p={p} />)}
+    </div>
+  );
+}
+
+function LinkCard({ p }: { p: LinkPreview }) {
+  const [imgOk, setImgOk] = useState(true);
+  const [iconOk, setIconOk] = useState(true);
+  const host = (() => { try { return new URL(p.url).hostname.replace(/^www\./, ""); } catch { return p.url; } })();
+  return (
+    <a
+      href={p.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group/card flex max-w-[560px] overflow-hidden rounded-md border border-line/50 bg-card/40 transition-colors hover:border-signal/40 hover:bg-card/70"
+    >
+      <span className="w-[3px] shrink-0 bg-signal/60" aria-hidden />
+      <span className="flex min-w-0 flex-1 flex-col gap-1 px-3 py-2.5">
+        <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+          {p.icon && iconOk && <img src={p.icon} alt="" className="size-3.5 rounded-sm" onError={() => setIconOk(false)} />}
+          <span className="truncate">{p.siteName || host}</span>
+        </span>
+        {p.title && <span className="line-clamp-2 font-sans text-[13px] font-semibold leading-snug text-foreground group-hover/card:text-signal">{p.title}</span>}
+        {p.description && <span className="line-clamp-2 font-sans text-[12px] leading-snug text-muted-foreground">{p.description}</span>}
+      </span>
+      {p.image && imgOk && (
+        <img
+          src={p.image}
+          alt=""
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setImgOk(false)}
+          className="hidden w-[168px] shrink-0 border-l border-line/40 object-cover sm:block"
+        />
+      )}
+    </a>
+  );
+}
 
 export function BlockView({ block, modeActive = false, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; modeActive?: boolean; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const ok = block.code === 0;
@@ -2865,6 +2937,7 @@ export function BlockView({ block, modeActive = false, onRerun, isLast, currentC
           )}
         </div>
       )}
+      {!isTuiActive && !block.pending && block.out.length > 0 && <LinkPreviews out={block.out} />}
     </article>
   );
 }

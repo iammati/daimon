@@ -11,6 +11,7 @@ import { Keys } from "./Kbd";
 import { GLASS_DEFAULT, GLASS_MIN_OPACITY, loadGlass, nativeBlurLabel, nativeBlurMode, saveGlass, type Glass } from "@/lib/daimon/appearance";
 import { shell } from "@/lib/daimon/rpc";
 import { usePresence } from "@/lib/daimon/presence";
+import { setLinkPreviewsEnabled, useLinkPreviewsEnabled } from "@/lib/daimon/linkPreview";
 
 type Theme = "light" | "dracula";
 
@@ -86,6 +87,7 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
   const [bell, setBell] = useState(false);
   const [notifEnabled, setNotifEnabled] = useState(false);
   const [notifThreshold, setNotifThreshold] = useState(10);
+  const linkPreviews = useLinkPreviewsEnabled();
   const [glass, setGlassState] = useState<Glass>(loadGlass);
   const setGlass = (patch: Partial<Glass>) => setGlassState((g) => { const n = { ...g, ...patch }; saveGlass(n); return n; });
 
@@ -287,6 +289,11 @@ export function SettingsModal({ open, onClose, theme, onTheme, fontSize, onFontS
           }}
         />
       ),
+    },
+    {
+      category: "terminal",
+      label: "Link previews",
+      node: <Toggle value={linkPreviews} onChange={setLinkPreviewsEnabled} />,
     },
     // Notifications
     {

@@ -477,7 +477,13 @@ function Daimon() {
       });
     }
   };
-  useEffect(() => () => contentObserver?.disconnect(), [contentObserver]);
+  useEffect(() => {
+    // (Re)attach what the refs registered. StrictMode runs this cleanup + setup once on mount,
+    // after the refs already ran; without re-observing here the disconnect below would leave
+    // every pane unobserved (no auto-scroll) until its elements happened to be replaced.
+    for (const el of observedContentRef.current.values()) contentObserver?.observe(el);
+    return () => contentObserver?.disconnect();
+  }, [contentObserver]);
 
   const updateSession = (id: string, patch: Partial<Session>) => {
     setSessions((prev) => prev.map((s) => s.id === id ? { ...s, ...patch } : s));
@@ -594,53 +600,49 @@ function Daimon() {
   const focusedSidRef = useRef(activeId);
   focusedSidRef.current = focusedPane === "right" && splitSessionId ? splitSessionId : activeId;
 
-  /** Return focus to the command input of the last active pane once the UI has re-rendered. */
-  const refocusComposer = () =>
-    requestAnimationFrame(() => setTimeout(() => {
-      // Don't steal focus from a text field that something else just focused (e.g. session rename).
-      const ae = document.activeElement as HTMLElement | null;
-      const editable = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
-      if (editable && !ae.closest("[data-pane]")) return;
-      focusComposer(focusedSidRef.current);
-    }, 0));
-
-  // Any modal/overlay closing → back to the command input.
   const anyModalOpen = paletteOpen || keysModalOpen || settingsOpen || globalSearchOpen || searchOpen || historyOpen;
   const prevModalOpenRef = useRef(false);
-
-  // Window restored / refocused (un-minimize, alt-tab back): focus the last active pane's
-  // command input — unless a modal is open or the browser already restored focus to a
-  // text field (e.g. a pager search, rename input).
   const anyModalOpenRef = useRef(anyModalOpen);
   anyModalOpenRef.current = anyModalOpen;
+
+  /**
+   * The one auto-focus routine: put the caret in the last active pane's command input —
+   * unless a modal is open, another text field holds focus (pager search, rename…) or a
+   * pager owns the keyboard. Used on window return, modal/pager close and full-screen exit.
+   */
+  const autoFocusComposer = (why: string) => {
+    requestAnimationFrame(() => {
+      if (anyModalOpenRef.current) { focusLog(`skip (${why}): modal open`); return; }
+      const ae = document.activeElement as HTMLElement | null;
+      // Another text field kept focus (pager search, rename…) — leave it. The composer
+      // itself doesn't count: it's often still activeElement while the webview had no
+      // keyboard focus, and re-focusing it is what puts the caret back.
+      const otherField = ae && !ae.hasAttribute("data-composer") &&
+        (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
+      if (otherField) { focusLog(`skip (${why}): another field has focus`); return; }
+      // A fullscreen pager owns the keyboard (j/k, q…); the composer under it must not grab focus.
+      if (document.querySelector(".pager-overlay")) { focusLog(`skip (${why}): pager open`); return; }
+      // The window is back but the webview itself has no keyboard focus (Windows/WebView2
+      // after an un-minimize or maximize): ask the host for it. Its `focus` event brings
+      // us back here with document.hasFocus() true.
+      if (!document.hasFocus()) {
+        focusLog(`page lacks focus (${why}) → ${requestPageFocus() ? "asked host" : "not asking (no host / asked <500ms ago)"}`);
+        return;
+      }
+      focusComposer(focusedSidRef.current);
+      focusLog(`focused composer (${why}) session=${focusedSidRef.current}`);
+    });
+  };
+  /** Same, once the UI has re-rendered (the thing that held focus is only just gone). */
+  const refocusComposer = (why = "overlay closed") =>
+    requestAnimationFrame(() => setTimeout(() => autoFocusComposer(why), 0));
+
+  // Window restored / refocused (un-minimize, alt-tab back).
   useEffect(() => {
     const onReturn = (e: Event) => {
       focusLog(`event ${e.type}`);
       if (document.visibilityState === "hidden") return;
-      tryFocus(e.type);
-    };
-    const tryFocus = (why: string) => {
-      requestAnimationFrame(() => {
-        if (anyModalOpenRef.current) { focusLog(`skip (${why}): modal open`); return; }
-        const ae = document.activeElement as HTMLElement | null;
-        // Another text field kept focus (pager search, rename…) — leave it. The composer
-        // itself doesn't count: it's often still activeElement while the webview had no
-        // keyboard focus, and re-focusing it is what puts the caret back.
-        const otherField = ae && !ae.hasAttribute("data-composer") &&
-          (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
-        if (otherField) { focusLog(`skip (${why}): another field has focus`); return; }
-        // A fullscreen pager owns the keyboard (j/k, q…); the composer under it must not grab focus.
-        if (document.querySelector(".pager-overlay")) { focusLog(`skip (${why}): pager open`); return; }
-        // The window is back but the webview itself has no keyboard focus (Windows/WebView2
-        // after an un-minimize or maximize): ask the host for it. Its `focus` event brings
-        // us back here with document.hasFocus() true.
-        if (!document.hasFocus()) {
-          focusLog(`page lacks focus (${why}) → ${requestPageFocus() ? "asked host" : "not asking (no host / asked <500ms ago)"}`);
-          return;
-        }
-        focusComposer(focusedSidRef.current);
-        focusLog(`focused composer (${why}) session=${focusedSidRef.current}`);
-      });
+      autoFocusComposer(e.type);
     };
     const onBlur = () => focusLog("event blur");
     // Every DOM focus move, to see what takes focus away from the command input.
@@ -663,7 +665,8 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
-    if (prevModalOpenRef.current && !anyModalOpen) refocusComposer();
+    // Any modal closing → back to the command input.
+    if (prevModalOpenRef.current && !anyModalOpen) refocusComposer("modal closed");
     prevModalOpenRef.current = anyModalOpen;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anyModalOpen]);
@@ -682,7 +685,7 @@ function Daimon() {
     const onClose = (e: Event) => {
       bump(e, -1);
       // Composer is unhidden on the next render — focus it once that has painted.
-      refocusComposer();
+      refocusComposer("pager closed");
     };
     window.addEventListener("pager-open", onOpen);
     window.addEventListener("pager-close", onClose);
@@ -862,6 +865,34 @@ function Daimon() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hoveredBlockId, active.blocks, altScreenActive, tuiBlockIds]);
 
+  // Leaving a full-screen program (nano, less, htop…): back to the command input, and — if the
+  // pane was following — straight to the bottom (the block just swapped terminal for output).
+  const prevTuiRef = useRef(tuiInActive);
+  useEffect(() => {
+    if (prevTuiRef.current && !tuiInActive) {
+      refocusComposer("left fullscreen");
+      if (follows(activeId)) scrollToBottom(activeId);
+    }
+    prevTuiRef.current = tuiInActive;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tuiInActive]);
+
+  // Only the user stops the following: wheel, touch, keys or a drag on the pane (scrollbar).
+  // An upward scroll without that is the browser clamping/anchoring after the content
+  // changed (a TUI block swapping back to output, a block collapsing) and must not count.
+  // -Infinity, not 0: "0" would read as a scroll at page load, so for the first 500ms every
+  // browser-made scroll (restored blocks laying out) would count as the user's and stop following.
+  const userScrollAtRef = useRef(-Infinity);
+  const pointerDownRef = useRef(false);
+  const markUserScroll = () => { userScrollAtRef.current = performance.now(); };
+  useEffect(() => {
+    const up = () => { pointerDownRef.current = false; };
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => { window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up); };
+  }, []);
+  const userIsScrolling = () => pointerDownRef.current || performance.now() - userScrollAtRef.current < 500;
+
   const handleScroll = (sessionId: string, el: HTMLElement) => {
     updateHeaderBlock(sessionId);
     const prev = lastScrollTopRef.current.get(sessionId) ?? el.scrollTop;
@@ -869,7 +900,7 @@ function Daimon() {
     if (atBottom(el)) {
       followRef.current.set(sessionId, true);
       if (sessionId === activeIdRef.current) toast.dismiss("new-output");
-    } else if (el.scrollTop < prev) {
+    } else if (el.scrollTop < prev && userIsScrolling()) {
       followRef.current.set(sessionId, false);
     }
   };
@@ -990,11 +1021,19 @@ function Daimon() {
     return (
       <>
         <div
+          // Observed too: when the pane itself shrinks (the composer/status bar coming back as a
+          // command finishes) the content size is unchanged, but the bottom would slide out of view.
+          data-follow-session={paneSessionId}
           ref={(el) => {
             if (el) scrollContainersRef.current.set(paneSessionId, el);
             else scrollContainersRef.current.delete(paneSessionId);
+            observeContent(`${paneSessionId}\u0000pane`, el);
           }}
           onScroll={(e) => handleScroll(paneSessionId, e.currentTarget)}
+          onWheel={markUserScroll}
+          onTouchMove={markUserScroll}
+          onKeyDown={markUserScroll}
+          onPointerDown={() => { pointerDownRef.current = true; markUserScroll(); }}
           className={`flex-1 overflow-y-auto px-6 py-8 ${isFocused ? "" : "cursor-pointer"}`}
           style={{ "--terminal-font-size": fontSize + "px" } as React.CSSProperties}
           onClick={() => { if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); }}
