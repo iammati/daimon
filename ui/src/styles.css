@@ -284,6 +284,15 @@
   animation: caret 1.1s steps(1) infinite;
 }
 
+/* Fullscreen TUI (alt-screen xterm inside a block): `absolute inset-0` must resolve
+   against the pane, not the block it lives in. Un-position every wrapper between the
+   pane and the terminal so [data-pane] is its containing block — no JS geometry, so it
+   tracks the sidebar, splits and window resizes for free. (position: fixed is no good
+   here: the glass <main> has backdrop-filter and captures fixed descendants.) */
+[data-pane] *:has(.tui-fullscreen) {
+  position: static !important;
+}
+
 /* xterm transparency: override built-in opaque canvas background */
 .xterm-transparent .xterm,
 .xterm-transparent .xterm-screen,

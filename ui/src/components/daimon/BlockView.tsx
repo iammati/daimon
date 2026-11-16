@@ -53,25 +53,6 @@ export const PagerContainerContext = createContext<HTMLElement | null>(null);
 //     boundary (start or after `_`) — so SECRET_VALUE, TOKEN_FILE, KEY_PREFIX match but MONKEY
 //     and TURKEY do not. Over-redaction in presentation mode is safe; silly false positives aren't.
 //  3. Lowercase `password:`/`token=` etc. in free text.
-/**
- * Pin a `position: fixed` element exactly over a viewport rect.
- * An ancestor with backdrop-filter / transform (the glass <main>) becomes the
- * containing block for fixed descendants, so viewport coordinates land shifted
- * by that ancestor's offset (the sidebar width). Measure where the element
- * actually ended up and compensate.
- */
-function placeFixedOver(el: HTMLElement, rect: DOMRect) {
-  el.style.left = rect.left + 'px';
-  el.style.top = rect.top + 'px';
-  el.style.width = rect.width + 'px';
-  el.style.height = rect.height + 'px';
-  const actual = el.getBoundingClientRect();
-  const dx = actual.left - rect.left;
-  const dy = actual.top - rect.top;
-  if (dx) el.style.left = rect.left - dx + 'px';
-  if (dy) el.style.top = rect.top - dy + 'px';
-}
-
 const SECRET_RE = new RegExp(
   "(?:ghp_|gho_|ghs_|github_pat_|xox[baprs]-|sk-[a-zA-Z0-9]{16,}|pk-live_|pk-test_|AKIA|ASIA|glpat-)[A-Za-z0-9_\\-]{8,}" +
   "|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}\\.[A-Za-z0-9_\\-]{10,}" +
@@ -2514,7 +2495,6 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
 
   // Inline TUI: create xterm directly in this block's div
   const inlineTuiRef = useRef<HTMLDivElement>(null);
-  const tuiPaneRef = useRef<HTMLElement | null>(null);
   // Seed from map in case altScreenEnter already fired before this component mounted
   const [tuiFullscreen, setTuiFullscreen] = useState(() => getAltScreen(sessionId));
   const tuiFitRef = useRef<(() => void) | null>(null);
@@ -2525,9 +2505,6 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     setTuiFullscreen(getAltScreen(sessionId));
     const unsub = shell.onAltScreen((tabId, enter) => {
       if (tabId !== sessionId) return;
-      if (enter && inlineTuiRef.current) {
-        tuiPaneRef.current = inlineTuiRef.current.closest('[data-pane]') as HTMLElement ?? null;
-      }
       setTuiFullscreen(enter);
     });
     return () => { unsub(); };
@@ -2535,23 +2512,12 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
   useEffect(() => {
     const el = inlineTuiRef.current;
     if (!el) return;
-    if (tuiFullscreen) {
-      const pane = tuiPaneRef.current ?? el.closest('[data-pane]') as HTMLElement ?? null;
-      if (pane) {
-        const rect = pane.getBoundingClientRect();
-        placeFixedOver(el, rect);
-      } else {
-        el.style.left = '';
-        el.style.top = '';
-        el.style.width = '';
-        el.style.height = '';
-      }
-    } else {
-      el.style.left = '';
-      el.style.top = '';
-      el.style.width = '';
-      el.style.height = '';
-    }
+    // Fullscreen is pure CSS (.tui-fullscreen covers the pane) — drop any inline
+    // geometry left over from inline mode so `inset: 0` decides the size.
+    el.style.left = '';
+    el.style.top = '';
+    el.style.width = '';
+    el.style.height = '';
     // double-rAF: first frame applies CSS, second measures after reflow
     requestAnimationFrame(() => requestAnimationFrame(() => {
       tuiFitRef.current?.();
@@ -2596,37 +2562,22 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     attachGpuRenderer(term);
     const kittyKeys = attachKittyKeyboard(term, (data) => sendRaw(sessionId, data));
     const stopSelectionSync = syncTerminalSelection(term);
-    tuiFitRef.current = () => { fit.fit(); resizePty(sessionId, term.cols, term.rows); };
-    // Ensure pane ref is captured (may not be set yet if this is first mount)
-    if (!tuiPaneRef.current) {
-      tuiPaneRef.current = (el.closest('[data-pane]') as HTMLElement) ?? null;
-    }
+    tuiFitRef.current = () => { updateHeight(); resizePty(sessionId, term.cols, term.rows); };
 
     // Cell dimensions — measure once after open
     const CELL_H = 13 * 1.2; // fontSize * lineHeight
     const replay = getTuiReplayBuffer(sessionId);
     let altScreen = getAltScreen(sessionId);
-    const getPaneRect = () => {
-      const pane = tuiPaneRef.current ?? (el.closest('[data-pane]') as HTMLElement) ?? null;
-      return pane?.getBoundingClientRect() ?? null;
-    };
-    // If alt-screen already active at mount, pre-position so first fit.fit()
-    // measures correct dimensions and PTY is sized correctly before TUI app draws.
-    if (altScreen) {
-      const rect = getPaneRect();
-      if (rect) {
-        placeFixedOver(el, rect);
-      }
-    }
     const updateHeight = () => {
-      if (!altScreen) {
-        el.style.left = '';
-        el.style.top = '';
-        el.style.width = '';
-        el.style.height = '';
-      }
+      el.style.left = '';
+      el.style.top = '';
+      el.style.width = '';
+      el.style.height = '';
       fit.fit();
-      if (!altScreen) {
+      // The class (React state) and `altScreen` (this closure) flip a frame apart;
+      // never pin an inline height while the fullscreen class is on, or it would
+      // override `inset: 0`.
+      if (!altScreen && !el.classList.contains('tui-fullscreen')) {
         const lines = term.buffer.active.length;
         el.style.height = Math.ceil(Math.max(lines, term.rows) * CELL_H) + "px";
       }
@@ -2643,12 +2594,6 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
     const ro = new ResizeObserver(() => {
       if (resizeRaf) cancelAnimationFrame(resizeRaf);
       resizeRaf = requestAnimationFrame(() => {
-        if (altScreen) {
-          const rect = getPaneRect();
-          if (rect) {
-            placeFixedOver(el, rect);
-          }
-        }
         updateHeight();
       });
     });
@@ -2771,7 +2716,7 @@ export function BlockView({ block, onRerun, isLast, currentCtx = "", sessionId =
         <div
           ref={inlineTuiRef}
           className={tuiFullscreen
-            ? "xterm-transparent fixed inset-0 z-50 bg-black"
+            ? "xterm-transparent tui-fullscreen absolute inset-0 z-50 bg-black"
             : "xterm-transparent mt-2.5 rounded"}
           style={{ minHeight: 0, willChange: "transform" }}
         />
