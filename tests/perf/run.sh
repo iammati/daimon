@@ -8,6 +8,7 @@
 # Everything runs against its own daemon, port and data dirs; a running daimon is untouched.
 # Fails (exit 1) when a check below misses. Raw numbers are printed as JSON.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1   # keep tests/perf free of __pycache__
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/daimon-perf.XXXXXX")"
