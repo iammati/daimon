@@ -148,6 +148,23 @@ function detectLang(input: string, text: string): string | null {
   return null;
 }
 
+/**
+ * detectLang for ANSI html without stripping all of it on every render (it re-renders each
+ * frame while output streams). The content checks look at the text start, so long output
+ * is judged on its first 64 KB — except JSON, which needs (and gets) the whole text.
+ */
+const LANG_SNIFF = 64 << 10;
+function detectLangHtml(input: string, html: string): string | null {
+  const byName = detectLang(input, "");
+  if (byName || !html) return byName;
+  const strip = (h: string) => h.replace(/<[^>]+>/g, "");
+  if (html.length <= LANG_SNIFF) return detectLang(input, strip(html));
+  const head = strip(html.slice(0, LANG_SNIFF));
+  const t = head.trimStart();
+  if (t.startsWith("{") || t.startsWith("[")) return detectLang(input, strip(html));
+  return detectLang(input, head.slice(0, head.lastIndexOf("\n") + 1 || undefined));
+}
+
 function CodeView({ text, lang }: { text: string; lang: string }) {
   const highlighted = useMemo(() => {
     try { return hljs.highlight(text, { language: lang }).value; }
@@ -2227,8 +2244,9 @@ function positionAt(root: Node, chars: number): [Node, number] {
  * selection is carried across the swap by its character offsets.
  */
 /** Large ANSI output: only the lines in view are in the DOM. */
-function VirtualHtmlLines({ html }: { html: string }) {
-  const lines = useMemo(() => splitHtmlLines(html), [html]);
+function VirtualHtmlLines({ html, htmlLines }: { html: string; htmlLines?: string[] | undefined }) {
+  // The parser hands over the lines while output streams; splitting is for stored blocks.
+  const lines = useMemo(() => htmlLines ?? splitHtmlLines(html), [htmlLines, html]);
   const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: lines.length,
@@ -2419,8 +2437,10 @@ function VirtualLines({ visibleLines, toneClass, search, pm, currentMatch, match
   );
 }
 
-function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
+function SearchableOutput({ html, htmlLines, lines, tone, pm, onSearch, onPathClick }: {
   html?: string;
+  /** `html` split per line, when the parser has it (see Out "ansi"). */
+  htmlLines?: string[] | undefined;
   lines?: string[];
   tone?: string;
   pm: boolean;
@@ -2553,8 +2573,8 @@ function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
             })}
           </div>
         )
-      ) : html !== undefined && !search && !pm && lineCountOver(html, VIRTUAL_THRESHOLD) ? (
-        <VirtualHtmlLines html={html} />
+      ) : html !== undefined && !search && !pm && (htmlLines ? htmlLines.length > VIRTUAL_THRESHOLD : lineCountOver(html, VIRTUAL_THRESHOLD)) ? (
+        <VirtualHtmlLines html={html} htmlLines={htmlLines} />
       ) : html !== undefined ? (
         <pre className="whitespace-pre-wrap font-mono text-[13px] leading-6">
           {search
@@ -2609,11 +2629,13 @@ function OutView({ out: rawOut, input = "", ctx = "", cwd, isLast = false, onSea
 
   if (out.kind === "ansi") {
     const rawHtml = rawOut.kind === "ansi" ? rawOut.html : out.html;
-    const raw = rawHtml.replace(/<[^>]+>/g, "");
-    const lang = detectLang(input, raw);
-    if (lang) return <CodeView text={pm ? redact(raw) : raw} lang={lang} />;
+    const lang = detectLangHtml(input, rawHtml);
+    if (lang) {
+      const raw = rawHtml.replace(/<[^>]+>/g, "");
+      return <CodeView text={pm ? redact(raw) : raw} lang={lang} />;
+    }
     // SearchableOutput redacts internally (with the amber highlight), so feed it the RAW html.
-    return <SearchableOutput html={rawHtml} pm={pm} {...(onSearch != null ? { onSearch } : {})} {...(onPathClick ? { onPathClick } : {})} />;
+    return <SearchableOutput html={rawHtml} htmlLines={rawOut.kind === "ansi" ? rawOut.lines : undefined} pm={pm} {...(onSearch != null ? { onSearch } : {})} {...(onPathClick ? { onPathClick } : {})} />;
   }
 
   if (out.kind === "lines") {

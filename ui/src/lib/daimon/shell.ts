@@ -31,7 +31,9 @@ export type GitLogRef = { name: string; kind: "local" | "remote" | "tag"; curren
 
 export type Out =
   | { kind: "lines"; lines: string[]; tone?: "normal" | "muted" | "bad" | "good" }
-  | { kind: "ansi"; html: string }
+  /** `lines`: the same html split per line (self-contained), when the parser already has it.
+   *  Non-enumerable — for rendering only, never persisted or copied. */
+  | { kind: "ansi"; html: string; lines?: string[] }
   | { kind: "image"; src: string }
   | { kind: "files"; items: { name: string; dir: boolean; size?: number | undefined }[] }
   | { kind: "lslong"; entries: LsEntry[]; total: string }
@@ -292,7 +294,7 @@ function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
 
   let out = "";
   let { open, curStyle, linkOpen, sgr } = st;
-  const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const esc = (t: string) => (!/[&<>]/.test(t) ? t : t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
   // SGR, or an OSC 8 hyperlink open (with URL) / close (empty URL)
   const re = /\x1b\[([0-9;]*)m|\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
   let last = 0;
@@ -327,11 +329,13 @@ function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
  * Split ANSI html (from ansiToHtml: text plus <span style> / <a> tags) into one
  * self-contained html string per line: tags open across a line break are closed at its
  * end and reopened at the start of the next line.
+ *
+ * `open`: the tags in effect before `html` (outermost first), e.g. from a previous call.
+ * It is updated in place to those in effect after it, so text can be split piece by piece.
  */
-export function splitHtmlLines(html: string): string[] {
+export function splitHtmlLines(html: string, open: string[] = []): string[] {
   const lines: string[] = [];
-  const open: string[] = []; // opening tags in effect, outermost first
-  let cur = "";
+  let cur = open.join("");
   const close = () => open.slice().reverse().map((t) => (t.startsWith("<a") ? "</a>" : "</span>")).join("");
   for (const m of html.matchAll(/<\/?[a-z][^>]*>|\n|[^<\n]+/gi)) {
     const t = m[0];
@@ -802,7 +806,13 @@ class OutputStream {
 
   // Colored output → html (or a colored diff → its plain text).
   private aNext = 0;
-  private aHtml = "";
+  // The html of the finished lines, as "\n"-joined text split in two so a snapshot can trim
+  // it without touching (and copying) all of it: `aCore` has no whitespace at either end,
+  // `aWs` is the whitespace after it. Their concatenation is the html so far.
+  private aCore = "";
+  private aWs = "";
+  private aLines: string[] = [];        // the same, one self-contained html string per line
+  private aLinesOpen: string[] = [];    // tags open at the end of aLines (see splitHtmlLines)
   private aState = newAnsiHtmlState();
   private aText = "";           // escape-free text of the finished lines, until `diff` is settled
   private aFirst = -1;          // first / last index in `done` with printable text
@@ -887,7 +897,14 @@ class OutputStream {
   private ansiOut(open: string[]): Out[] {
     for (; this.aNext < this.done.length; this.aNext++) {
       const r = this.done[this.aNext]!;
-      this.aHtml += ansiHtmlChunk(r + "\n", this.aState);
+      // A line holds no "\n", so its html is the same with or without the separator.
+      const lineHtml = ansiHtmlChunk(r, this.aState);
+      this.aLines.push(splitHtmlLines(lineHtml, this.aLinesOpen)[0]!);
+      const piece = (this.aNext > 0 ? "\n" : "") + lineHtml;
+      const kept = piece.trimEnd();
+      if (!kept) this.aWs += piece;
+      else if (!this.aCore) { this.aCore = (this.aWs + kept).trimStart(); this.aWs = piece.slice(kept.length); }
+      else { this.aCore += this.aWs + kept; this.aWs = piece.slice(kept.length); }
       if (this.diff === false) continue;
       const text = ANSI(r);
       if (!isBlank(text)) {
@@ -908,8 +925,14 @@ class OutputStream {
       if (isDiff) return [{ kind: "gitdiff", raw: text }];
     }
     const st = { ...this.aState };
-    const html = this.aHtml + ansiHtmlChunk(open.join("\n"), st) + ansiHtmlClose(st);
-    return [{ kind: "ansi", html: html.trim() }];
+    const openHtml = ansiHtmlChunk(open.join("\n"), st) + ansiHtmlClose(st);
+    // = (finished html + "\n" + openHtml).trim(), touching only the small end.
+    const end = (this.aNext > 0 ? this.aWs + "\n" : "") + openHtml;
+    const html = this.aCore ? this.aCore + end.trimEnd() : end.trim();
+    const out: Out = { kind: "ansi", html };
+    const lines = open.length ? [...this.aLines, ...splitHtmlLines(openHtml, [...this.aLinesOpen])] : this.aLines.slice();
+    Object.defineProperty(out, "lines", { value: lines, enumerable: false });
+    return [out];
   }
 
   private plainOut(open: string[]): Out[] {
@@ -1445,7 +1468,9 @@ export async function run(
 
       const ms = elapsed();
       maybeNotify(input, ms);
-      const out = capOutput(parseOutput(normalBuf, effectiveInput));
+      // The stream has parsed everything already (it falls back to parseOutput itself for
+      // output it can't follow); parsing the whole buffer again took up to a second.
+      const out = capOutput(stream.snapshot(normalBuf));
 
       const gb = finalCtx?.gitBranch ?? state.gitBranch;
       const nextState: State = {
@@ -1479,3 +1504,6 @@ export async function run(
     ensureReady(tabId).then(() => { commandWritten = true; shell.writeCommand(tabId, effectiveInput + "\n", input).catch(() => cleanup()); });
   });
 }
+
+/** For tests/perf/ui-stream.ts: the parser stages, outside the browser. */
+export { OutputStream, parseOutput };

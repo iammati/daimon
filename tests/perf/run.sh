@@ -31,6 +31,24 @@ with open(os.path.join(d, "sgr.txt"), "w") as w:
     for i in range(150000): w.write(f"\x1b[3{i%8}mline {i:07d}\x1b[0m \x1b[1;4{(i+3)%8}mbold\x1b[0m quick brown fox jumps over\n")
 EOF
 
+echo "[perf] UI output parser (streamed must equal parsed)…"
+python3 - "$WORK/files" <<'EOF'
+import os, sys
+d = sys.argv[1]
+small = {
+    "edges.txt": "\x1b[32m  ok\x1b[0m   \n\n\x1b[1mbold\n\x1b[0m\n   indented   \n\n",
+    "progress.txt": "progress 10%\rprogress 50%\rprogress 100%\ndone\n",
+    "logfmt.txt": 'level=info msg="a" k=1\nlevel=warn msg="b" k=2\nlevel=error msg="c" k=3\n',
+    "yaml.txt": 'a: 1\nb:\n  c: [1,2]\n  d: "x"\nlist:\n  - one\n  - two\n',
+    "json.txt": '{\n  "name": "x",\n  "list": [1, 2, 3]\n}\n',
+    "diff.txt": "diff --git a/f b/f\nindex 1..2 100644\n\x1b[1m--- a/f\x1b[m\n\x1b[1m+++ b/f\x1b[m\n\x1b[36m@@ -1 +1 @@\x1b[m\n\x1b[31m-old\x1b[m\n\x1b[32m+new\x1b[m\n",
+    "link.txt": "see \x1b]8;;https://example.com\x07\x1b[34mexample\x1b[0m\x1b]8;;\x07 and \x1b[1;31mred\nstill\x1b[0m\n",
+}
+for name, text in small.items():
+    open(os.path.join(d, name), "w").write(text)
+EOF
+(cd "$ROOT/ui" && bun "$HERE/ui-stream.ts" "$WORK"/files/*.txt) | grep -v 'no daemon token'
+
 DAIMON_PORT=$PORT XDG_DATA_HOME="$WORK/data" XDG_STATE_HOME="$WORK/state" RUST_LOG=warn \
   "$ROOT/target/release/pty-daemon" >"$WORK/daemon.log" 2>&1 &
 DAEMON_PID=$!
