@@ -48,8 +48,22 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     sourcemap: true,
-    rollupOptions: {
+    rolldownOptions: {
       input: "index.html",
+      output: {
+        // Libraries in their own chunks: no single bundle over Vite's 500 kB warning, and the
+        // app's own chunk changes without invalidating the (larger, rarely changing) vendor ones.
+        codeSplitting: {
+          groups: [
+            { name: "react", test: /node_modules[\\/](react|react-dom|scheduler)[\\/]/ },
+            { name: "highlight", test: /node_modules[\\/]highlight\.js[\\/]/ },
+            { name: "markdown", test: /node_modules[\\/](marked|dompurify)[\\/]/ },
+            { name: "wraith", test: /node_modules[\\/]wraithterm[\\/]/ },
+            { name: "ui-vendor", test: /node_modules[\\/](@radix-ui|@floating-ui|@tanstack|cmdk|lucide-react|sonner|vaul)[\\/]/ },
+            { name: "vendor", test: /node_modules[\\/]/ },
+          ],
+        },
+      },
     },
   },
   server: { port: 7881 },
