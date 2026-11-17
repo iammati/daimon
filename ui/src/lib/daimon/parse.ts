@@ -191,7 +191,8 @@ function sgrCssUncached(s: Sgr): string {
   if (s.dim) style += "opacity:0.7;";
   if (s.italic) style += "font-style:italic;";
   if (s.underline) style += "text-decoration:underline;";
-  if (s.fg) style += `color:${sgrColor(s.fg, "#ccc")};`;
+  // Bold standard colours show bright, as in terminals (a logo in bold white is bright white).
+  if (s.fg) style += `color:${sgrColor(s.bold && /^3[0-7]$/.test(s.fg) ? String(Number(s.fg) + 60) : s.fg, "#ccc")};`;
   if (s.bg) style += `background:${sgrColor(s.bg, "#333")};`;
   return style;
 }

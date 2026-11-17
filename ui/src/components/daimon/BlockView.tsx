@@ -157,6 +157,9 @@ const LANG_SNIFF = 64 << 10;
 function detectLangHtml(input: string, html: string, htmlLines?: string[]): string | null {
   const byName = detectLang(input, "");
   if (byName || !html) return byName;
+  // The program coloured its own output (fastfetch, ls --color): show its colours, don't
+  // re-highlight it as a guessed language ("OS: Debian" reads as YAML).
+  if ((htmlLines ? htmlLines.slice(0, 200).join("") : html.slice(0, LANG_SNIFF)).includes("color:")) return null;
   const strip = (h: string) => h.replace(/<[^>]+>/g, "");
   if (html.length <= LANG_SNIFF) return detectLang(input, strip(html));
   // While output streams, read the start from the per-line html (slicing the html string
@@ -2248,6 +2251,12 @@ function positionAt(root: Node, chars: number): [Node, number] {
  * selection is carried across the swap by its character offsets.
  */
 /** Large ANSI output: only the lines in view are in the DOM. */
+/**
+ * Row height of a program's own (coloured) output: single-spaced like a terminal (~1.3×), so
+ * ASCII art, box drawing and colour bars join up. Keep in step with `leading-[17px]` below.
+ */
+const ANSI_ROW_PX = 17;
+
 function VirtualHtmlLines({ html, htmlLines }: { html: string; htmlLines?: string[] | undefined }) {
   // The parser hands over the lines while output streams; splitting is for stored blocks.
   const lines = useMemo(() => htmlLines ?? splitHtmlLines(html), [htmlLines, htmlLines ? null : html]);
@@ -2255,7 +2264,7 @@ function VirtualHtmlLines({ html, htmlLines }: { html: string; htmlLines?: strin
   const rowVirtualizer = useVirtualizer({
     count: lines.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 24, // 1.5rem line-height
+    estimateSize: () => ANSI_ROW_PX,
     overscan: 20,
   });
   // Follow the output as it grows, until the user scrolls up (as VirtualLines does).
@@ -2274,7 +2283,7 @@ function VirtualHtmlLines({ html, htmlLines }: { html: string; htmlLines?: strin
         followRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
       }}
     >
-      <div className="relative font-mono text-[13px] leading-6 whitespace-pre-wrap" style={{ height: rowVirtualizer.getTotalSize() }}>
+      <div className="relative font-mono text-[13px] leading-[17px] whitespace-pre-wrap" style={{ height: rowVirtualizer.getTotalSize() }}>
         {rowVirtualizer.getVirtualItems().map((vrow) => (
           <div
             key={vrow.index}
@@ -2581,7 +2590,7 @@ function SearchableOutput({ html, htmlLines, lines, tone, pm, onSearch, onPathCl
       ) : html !== undefined && !search && !pm && (htmlLines ? htmlLines.length > VIRTUAL_THRESHOLD : lineCountOver(html, VIRTUAL_THRESHOLD)) ? (
         <VirtualHtmlLines html={html} htmlLines={htmlLines} />
       ) : html !== undefined ? (
-        <pre className="whitespace-pre-wrap font-mono text-[13px] leading-6">
+        <pre className="whitespace-pre-wrap font-mono text-[13px] leading-[17px]">
           {search
             ? highlightWithCurrent((pm ? redact(stripHtml(html)) : html.replace(/<[^>]+>/g, "")), search, 0, clampedCurrent)
             : pm
