@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
+import fs from "fs";
 import { wraith } from "wraithterm/vite";
 import type { Plugin } from "vite";
 
@@ -32,8 +33,15 @@ export default defineConfig({
   // wraith(): keeps wraithterm's worker / wasm / font URLs intact through dep prebundling.
   plugins: [react(), tailwindcss(), wraith(), daimonToken()],
   resolve: {
+    dedupe: ["react", "react-dom"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // User plugin file — edit ~/.config/daimon/plugins.tsx to extend daimon.
+      // Falls back to the no-op stub in src/ when the user file doesn't exist.
+      "@daimon-plugins": (() => {
+        const userPlugins = path.join(process.env.HOME ?? "", ".config/daimon/plugins.tsx");
+        return fs.existsSync(userPlugins) ? userPlugins : path.resolve(__dirname, "./src/plugins.tsx");
+      })(),
     },
   },
   build: {

@@ -1,4 +1,5 @@
 import { BrowserWindow, ApplicationMenu } from "electrobun/bun";
+import { openExternal } from "electrobun/bun/utils";
 import { connectDaemon } from "./daemon";
 import {
   attachVariableBlur, backdropForBlur, loadVariableBlur, prepareWindow, setBackdrop, setVariableBlur,
@@ -202,3 +203,18 @@ if (isWindows && nativeTransparent) {
 }
 
 console.log("[main] window opened →", frontendUrl.replace(/daimon_token=[^&]+/, "daimon_token=…"));
+
+// Open a URL in the system default browser via Electrobun's native API.
+hostMessageHandlers.push((msg) => {
+  if (msg.type !== "openUrl" || typeof (msg as { url?: unknown }).url !== "string") return;
+  const url = (msg as { url: string }).url;
+  try {
+    if (url === "tailscale://") {
+      Bun.spawn(["open", "-a", "Tailscale"]);
+    } else if (url.startsWith("https://") || url.startsWith("http://")) {
+      openExternal(url);
+    }
+  } catch (e) {
+    console.error("[main] openUrl error:", e);
+  }
+});

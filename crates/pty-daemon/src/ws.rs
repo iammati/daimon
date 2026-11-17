@@ -1,10 +1,12 @@
 /// WebSocket server — one connection per tab, multiplexed over a single port.
+/// Also handles HTTP GET /plugins.js (token-gated) on the same port.
 
 use crate::session::{SessionCommand, SessionEvent, SessionManager};
 use crate::store::Store;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -14,6 +16,62 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 use tracing::{error, info};
+
+/// Serve `GET /plugins.js?token=…` over a raw TCP stream.
+/// Returns true if the request was handled (caller should not upgrade to WS).
+async fn try_serve_http(stream: &mut tokio::net::TcpStream, token: &str) -> bool {
+    // Peek at first bytes to detect HTTP GET (vs WS upgrade which starts the same way,
+    // but we only intercept the specific /plugins.js path).
+    let mut buf = [0u8; 512];
+    let n = match tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        stream.peek(&mut buf),
+    ).await {
+        Ok(Ok(n)) => n,
+        _ => return false,
+    };
+    let head = std::str::from_utf8(&buf[..n]).unwrap_or("");
+    // Only intercept GET /plugins.js
+    if !head.starts_with("GET /plugins.js") { return false; }
+
+    // Consume the full request (read until \r\n\r\n)
+    let mut req_buf = vec![0u8; 2048];
+    let _ = stream.read(&mut req_buf).await;
+    let req = String::from_utf8_lossy(&req_buf);
+
+    // Extract query string from request line
+    let auth_ok = req.lines().next()
+        .and_then(|line| line.split_whitespace().nth(1)) // path+query
+        .map(|path| {
+            path.split('?').nth(1).unwrap_or("").split('&')
+                .any(|kv| kv.strip_prefix("token=").is_some_and(|t| constant_time_eq(t.as_bytes(), token.as_bytes())))
+        })
+        .unwrap_or(false);
+
+    if !auth_ok {
+        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 12\r\n\r\nUnauthorized").await;
+        return true;
+    }
+
+    let plugins_path = dirs::home_dir()
+        .map(|h| h.join(".config/daimon/plugins.js"))
+        .filter(|p| p.exists());
+
+    match plugins_path.and_then(|p| std::fs::read(p).ok()) {
+        Some(body) => {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.write_all(&body).await;
+        }
+        None => {
+            let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
+        }
+    }
+    true
+}
 
 pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -> Result<()> {
     let db = Arc::new(db);
@@ -37,7 +95,7 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
     info!("WebSocket server ready");
 
     loop {
-        let (stream, addr) = listener.accept().await?;
+        let (mut stream, addr) = listener.accept().await?;
         info!("connection from {}", addr);
 
         let mgr = mgr.clone();
@@ -47,6 +105,9 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
         clients.lock().await.push(client_tx.clone());
 
         tokio::spawn(async move {
+            // Check for HTTP GET /plugins.js before attempting WS upgrade.
+            if try_serve_http(&mut stream, &token).await { return; }
+
             // Every client must present the token (?token=…): the daemon runs shells, and
             // any web page can open a WebSocket to localhost.
             let check = |req: &Request, resp: Response| -> std::result::Result<Response, ErrorResponse> {
@@ -310,6 +371,37 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
                                     _ => serde_json::Value::Null,
                                 };
                                 let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
+                            });
+                        }
+                        Ok(SessionCommand::TailscaleStatus { req_id }) => {
+                            let tx = client_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = crate::commands::tailscale_status();
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok: true, data });
+                            });
+                        }
+                        Ok(SessionCommand::TailscaleUp { req_id }) => {
+                            let tx = client_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = crate::commands::tailscale_up();
+                                let ok = data["ok"].as_bool().unwrap_or(false);
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok, data });
+                            });
+                        }
+                        Ok(SessionCommand::TailscaleDown { req_id }) => {
+                            let tx = client_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = crate::commands::tailscale_down();
+                                let ok = data["ok"].as_bool().unwrap_or(false);
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok, data });
+                            });
+                        }
+                        Ok(SessionCommand::TailscaleLoginUrl { req_id }) => {
+                            let tx = client_tx.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let data = crate::commands::tailscale_login_url();
+                                let ok = data["ok"].as_bool().unwrap_or(false);
+                                let _ = tx.blocking_send(SessionEvent::Response { req_id, ok, data });
                             });
                         }
                         Err(e) => error!("bad command: {}: {}", text, e),

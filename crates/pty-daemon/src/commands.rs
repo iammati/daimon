@@ -445,3 +445,62 @@ pub fn git_diff(args: &[String], cwd: &str) -> Value {
         Ok(raw) => json!({ "raw": raw }),
     }
 }
+
+pub fn tailscale_status() -> Value {
+    match run("tailscale", &["status", "--json"], None) {
+        Err(e) => json!({ "error": e, "state": "unknown" }),
+        Ok(raw) => {
+            let parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&raw);
+            match parsed {
+                Err(_) => json!({ "error": "parse error", "state": "unknown" }),
+                Ok(v) => {
+                    let state = v["BackendState"].as_str().unwrap_or("unknown").to_string();
+                    let online = v["Self"]["Online"].as_bool().unwrap_or(false);
+                    let auth_url = v["AuthURL"].as_str().unwrap_or("").to_string();
+                    let ip = v["Self"]["TailscaleIPs"].as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let hostname = v["Self"]["HostName"].as_str().unwrap_or("").to_string();
+                    // Detect login-state health warning (custom control server returns this
+                    // instead of setting AuthURL / BackendState=NeedsLogin)
+                    let login_issue = v["Health"].as_array()
+                        .map(|arr| arr.iter().any(|h| {
+                            let s = h.as_str().unwrap_or("").to_lowercase();
+                            s.contains("logged out") || s.contains("login")
+                        }))
+                        .unwrap_or(false);
+                    json!({ "state": state, "online": online, "authURL": auth_url, "ip": ip, "hostname": hostname, "loginIssue": login_issue })
+                }
+            }
+        }
+    }
+}
+
+pub fn tailscale_login_url() -> Value {
+    // Run `tailscale up` with the SAP control server in the background.
+    // tailscaled will open the browser with the auth URL automatically.
+    use std::process::Command;
+    let result = Command::new("tailscale")
+        .args(["up", "--accept-routes", "--login-server=https://tailscale.global.cloud.sap"])
+        .spawn();
+    match result {
+        Ok(_) => json!({ "ok": true }),
+        Err(e) => json!({ "ok": false, "error": e.to_string() }),
+    }
+}
+
+pub fn tailscale_up() -> Value {
+    match run("tailscale", &["up"], None) {
+        Err(e) => json!({ "ok": false, "error": e }),
+        Ok(_) => json!({ "ok": true }),
+    }
+}
+
+pub fn tailscale_down() -> Value {
+    match run("tailscale", &["down"], None) {
+        Err(e) => json!({ "ok": false, "error": e }),
+        Ok(_) => json!({ "ok": true }),
+    }
+}
