@@ -104,6 +104,14 @@ function request<T>(msg: object, timeoutMs = 5000): Promise<T> {
 let ws: WebSocket | null = null;
 const pending: string[] = [];
 let failures = 0;
+let everConnected = false;
+const reconnectListeners = new Set<() => void>();
+
+/** Called after the connection to the daemon came back (not on the first connect). */
+export function onReconnect(fn: () => void): () => void {
+  reconnectListeners.add(fn);
+  return () => { reconnectListeners.delete(fn); };
+}
 
 async function connect() {
   // No token yet, or it keeps getting refused (daemon replaced): ask the dev server.
@@ -118,7 +126,13 @@ async function connect() {
   ws = new WebSocket(creds
     ? `ws://localhost:${creds.port}/?token=${encodeURIComponent(creds.token)}`
     : "ws://localhost:7878");
-  ws.onopen = () => { opened = true; failures = 0; while (pending.length) ws!.send(pending.shift()!); };
+  ws.onopen = () => {
+    opened = true; failures = 0;
+    while (pending.length) ws!.send(pending.shift()!);
+    // Events sent while we were away are gone: let the UI resync its sessions.
+    if (everConnected) reconnectListeners.forEach((fn) => fn());
+    everConnected = true;
+  };
   ws.onclose = () => {
     ws = null;
     if (!opened) failures++;

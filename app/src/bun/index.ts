@@ -38,6 +38,8 @@ const query = [
   nativeTransparent && isWindows && (variableBlur ? "blur=variable" : "blur=steps"),
   // The page draws the title bar (drag strip + minimize / maximize / close): see winFrame.ts.
   isWindows && "frame=custom",
+  // Benchmark mode: the UI runs these commands and records timings (see ui/src/lib/daimon/bench.ts).
+  process.env.DAIMON_BENCH && `bench=${encodeURIComponent(process.env.DAIMON_BENCH)}`,
 ].filter(Boolean);
 const frontendUrl = query.length ? `${baseUrl}?${query.join("&")}` : baseUrl;
 

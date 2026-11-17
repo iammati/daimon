@@ -158,6 +158,10 @@ const activeCleanups = new Map<string, (opts?: { cancelled?: boolean }) => void>
 export function abandonRun(tabId: string) {
   activeCleanups.get(tabId)?.({ cancelled: true });
 }
+/** Finalise a tab's running block with the output it has (its end marker was missed). */
+export function finishRun(tabId: string) {
+  activeCleanups.get(tabId)?.();
+}
 
 // Apply backspace
 function applyBackspace(s: string): string {
@@ -317,6 +321,56 @@ function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
   out += esc(s.slice(last));
   st.open = open; st.curStyle = curStyle; st.linkOpen = linkOpen; st.sgr = sgr;
   return out;
+}
+
+/**
+ * Split ANSI html (from ansiToHtml: text plus <span style> / <a> tags) into one
+ * self-contained html string per line: tags open across a line break are closed at its
+ * end and reopened at the start of the next line.
+ */
+export function splitHtmlLines(html: string): string[] {
+  const lines: string[] = [];
+  const open: string[] = []; // opening tags in effect, outermost first
+  let cur = "";
+  const close = () => open.slice().reverse().map((t) => (t.startsWith("<a") ? "</a>" : "</span>")).join("");
+  for (const m of html.matchAll(/<\/?[a-z][^>]*>|\n|[^<\n]+/gi)) {
+    const t = m[0];
+    if (t === "\n") { lines.push(cur + close()); cur = open.join(""); continue; }
+    if (t.startsWith("</")) { open.pop(); cur += t; continue; }
+    if (t.startsWith("<")) { open.push(t); cur += t; continue; }
+    cur += t;
+  }
+  lines.push(cur + close());
+  return lines;
+}
+
+/**
+ * How much of one block's output is kept: the first HEAD and last TAIL lines. Other
+ * terminals keep a few thousand lines of scrollback in all; keeping every line of a
+ * 100 MB `cat` costs gigabytes in the webview, the database and the daemon.
+ */
+const KEEP_HEAD_LINES = 1_000;
+const KEEP_TAIL_LINES = 50_000;
+const omitted = (n: number) => `… ${n.toLocaleString("en-US")} lines omitted …`;
+
+/** Trim a finished block's output to KEEP_HEAD_LINES + KEEP_TAIL_LINES (plain and ANSI text). */
+export function capOutput(out: Out[]): Out[] {
+  return out.map((o) => {
+    if (o.kind === "lines" && o.lines.length > KEEP_HEAD_LINES + KEEP_TAIL_LINES) {
+      const n = o.lines.length - KEEP_HEAD_LINES - KEEP_TAIL_LINES;
+      return { ...o, lines: [...o.lines.slice(0, KEEP_HEAD_LINES), omitted(n), ...o.lines.slice(-KEEP_TAIL_LINES)] };
+    }
+    if (o.kind === "ansi") {
+      // Count before splitting: most output is far below the cap.
+      let count = 1;
+      for (let i = o.html.indexOf("\n"); i >= 0 && count <= KEEP_HEAD_LINES + KEEP_TAIL_LINES; i = o.html.indexOf("\n", i + 1)) count++;
+      if (count <= KEEP_HEAD_LINES + KEEP_TAIL_LINES) return o;
+      const lines = splitHtmlLines(o.html);
+      const n = lines.length - KEEP_HEAD_LINES - KEEP_TAIL_LINES;
+      return { ...o, html: [...lines.slice(0, KEEP_HEAD_LINES), omitted(n), ...lines.slice(-KEEP_TAIL_LINES)].join("\n") };
+    }
+    return o;
+  });
 }
 
 function ansiToHtml(raw: string): string {
@@ -1354,11 +1408,14 @@ export async function run(
       // would pollute normalBuf, causing parse() to produce different output than
       // the last emitProgress call (flicker). Unsubscribe now, then cleanup shortly after.
       globalOutputOff?.(); globalOutputOff = null;
-      // Freeze the clock now; the 100ms below is finalisation, not command time.
+      // Freeze the clock now; what follows is finalisation, not command time.
       tEnd ??= Date.now();
       pendingBlock.settled = true;
       onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf), pending: true });
-      setTimeout(cleanup, 100);
+      // All of the command's output is already here: the daemon sends a chunk's output
+      // before its prompt event, over one ordered socket. Finalise on the next tick — a
+      // longer wait only kept the block pending (and the composer disabled) for nothing.
+      setTimeout(cleanup, 0);
     });
 
     function cleanup(opts?: { keepSession?: boolean; cancelled?: boolean }) {
@@ -1388,7 +1445,7 @@ export async function run(
 
       const ms = elapsed();
       maybeNotify(input, ms);
-      const out = parseOutput(normalBuf, effectiveInput);
+      const out = capOutput(parseOutput(normalBuf, effectiveInput));
 
       const gb = finalCtx?.gitBranch ?? state.gitBranch;
       const nextState: State = {

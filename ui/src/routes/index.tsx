@@ -7,8 +7,9 @@ import { CommandIcon } from "@/components/daimon/CommandIcon";
 import { Composer } from "@/components/daimon/Composer";
 import { HistoryPanel } from "@/components/daimon/HistoryPanel";
 import { ContextSwitcher } from "@/components/daimon/ContextSwitcher";
-import { run, sendRaw, resizePty, notifyAltScreen, onAltScreenChange, onTuiChange, STREAMING_INTERACTIVE_RE, isStreamingSession, isWarpified, abandonRun, setNotifConfig, type Block, type State } from "@/lib/daimon/shell";
-import { shell, type AttachInfo } from "@/lib/daimon/rpc";
+import { run, sendRaw, resizePty, notifyAltScreen, onAltScreenChange, onTuiChange, STREAMING_INTERACTIVE_RE, isStreamingSession, isWarpified, abandonRun, finishRun, setNotifConfig, type Block, type State } from "@/lib/daimon/shell";
+import { shell, onReconnect, type AttachInfo } from "@/lib/daimon/rpc";
+import { startBench } from "@/lib/daimon/bench";
 import { displayPath } from "@/lib/daimon/world";
 import kubernetesIcon from "@/assets/kubernetes-icon.svg";
 import { LandingPage } from "@/components/daimon/LandingPage";
@@ -551,6 +552,21 @@ function Daimon() {
     }));
     setPendingResumes(live.filter(([, info]) => info.running));
   };
+  // After a dropped connection (daemon restart, or it gave up on a stalled UI) events were
+  // lost: close blocks still waiting for an end marker, then reattach like at startup, which
+  // resumes commands still running with the output the daemon kept.
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  const reattachRef = useRef(reattach);
+  reattachRef.current = reattach;
+  useEffect(() => onReconnect(() => {
+    const all = sessionsRef.current;
+    for (const s of all) {
+      if (s.blocks.some((b) => b.pending) && !isStreamingSession(s.id)) finishRun(s.id);
+    }
+    void reattachRef.current(all.map((s) => s.id));
+  }), []);
+
   useEffect(() => {
     if (!pendingResumes.length) return;
     setPendingResumes([]);
@@ -1009,6 +1025,14 @@ function Daimon() {
     scrollToBottom(sessionId);
     setTimeout(() => window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } })), 1);
   };
+
+  // Benchmark mode (DAIMON_BENCH): drives the active session through the normal submit path.
+  const benchApi = useRef<{ submit: (cmd: string) => Promise<void>; busy: () => boolean }>({ submit: () => Promise.resolve(), busy: () => true });
+  benchApi.current = {
+    submit: (cmd: string) => submit(cmd),
+    busy: () => (sessions.find((s) => s.id === activeId) ?? sessions[0]!).blocks.some((b) => b.pending),
+  };
+  useEffect(() => { startBench(() => benchApi.current); }, []);
 
   const pickCtx = (name: string) => submit(`u8s set --context ${name} && u8s sync`);
 

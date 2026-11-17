@@ -9,7 +9,7 @@ import { isMarkdownPath, useMarkdownRendered, toggleMarkdownRendered } from "@/l
 import { fetchLinkPreview, previewUrls, useLinkPreviewsEnabled, type LinkPreview } from "@/lib/daimon/linkPreview";
 import { displayPath } from "@/lib/daimon/world";
 import { shell } from "@/lib/daimon/rpc";
-import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, onAltScreenChange, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml } from "@/lib/daimon/shell";
+import { sendRaw, resizePty, getTuiReplayBuffer, getAltScreen, onAltScreenChange, takeRedraw, STREAMING_INTERACTIVE_RE, abandonRun, looksLikeYaml, splitHtmlLines } from "@/lib/daimon/shell";
 import type { Block, Out, LsEntry, GitStatusFile, GitBranchNode, GitLogRef } from "@/lib/daimon/shell";
 import { Wraith } from "wraithterm";
 import hljs from "highlight.js/lib/core";
@@ -2226,6 +2226,54 @@ function positionAt(root: Node, chars: number): [Node, number] {
  * update, which would throw away a text selection made in it (even mid-drag) — so the
  * selection is carried across the swap by its character offsets.
  */
+/** Large ANSI output: only the lines in view are in the DOM. */
+function VirtualHtmlLines({ html }: { html: string }) {
+  const lines = useMemo(() => splitHtmlLines(html), [html]);
+  const parentRef = useRef<HTMLDivElement>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: lines.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 24, // 1.5rem line-height
+    overscan: 20,
+  });
+  // Follow the output as it grows, until the user scrolls up (as VirtualLines does).
+  const followRef = useRef(true);
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (el && followRef.current) el.scrollTop = el.scrollHeight;
+  }, [lines.length]);
+  return (
+    <div
+      ref={parentRef}
+      className="overflow-auto"
+      style={{ maxHeight: "60vh" }}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        followRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+      }}
+    >
+      <div className="relative font-mono text-[13px] leading-6 whitespace-pre-wrap" style={{ height: rowVirtualizer.getTotalSize() }}>
+        {rowVirtualizer.getVirtualItems().map((vrow) => (
+          <div
+            key={vrow.index}
+            data-index={vrow.index}
+            ref={rowVirtualizer.measureElement}
+            style={{ position: "absolute", top: 0, transform: `translateY(${vrow.start}px)`, width: "100%", minHeight: 24 }}
+            dangerouslySetInnerHTML={{ __html: lines[vrow.index] || " " }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Line count above which output is virtualized; counts newlines without splitting. */
+function lineCountOver(s: string, n: number): boolean {
+  let i = -1;
+  for (let c = 0; c <= n; c++) { i = s.indexOf("\n", i + 1); if (i < 0) return false; }
+  return true;
+}
+
 function AnsiHtml({ html }: { html: string }) {
   const ref = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
@@ -2505,6 +2553,8 @@ function SearchableOutput({ html, lines, tone, pm, onSearch, onPathClick }: {
             })}
           </div>
         )
+      ) : html !== undefined && !search && !pm && lineCountOver(html, VIRTUAL_THRESHOLD) ? (
+        <VirtualHtmlLines html={html} />
       ) : html !== undefined ? (
         <pre className="whitespace-pre-wrap font-mono text-[13px] leading-6">
           {search
