@@ -1,21 +1,32 @@
 /// Pure PTY output parsing — no I/O, fully unit-testable.
 
+use regex_lite::Regex;
+use std::sync::LazyLock;
+
 /// Strip ANSI escape sequences from raw PTY output.
 pub fn strip_ansi(s: &str) -> String {
     // Remove CSI sequences: ESC [ ... letter
-    let re_csi = regex_lite::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap();
+    static RE_CSI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]").unwrap());
     // Remove OSC sequences: ESC ] ... BEL or ST
-    let re_osc = regex_lite::Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap();
-    let s = re_csi.replace_all(s, "");
-    let s = re_osc.replace_all(&s, "");
+    static RE_OSC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap());
+    if !s.contains('\x1b') {
+        return s.replace('\r', "");
+    }
+    let s = RE_CSI.replace_all(s, "");
+    let s = RE_OSC.replace_all(&s, "");
     s.replace('\r', "")
 }
 
 /// Strip PTY mode-set sequences that must not reach the frontend xterm.
 /// Preserved: cursor visibility, mouse reporting, alt-screen, focus events.
 pub fn strip_pty_modes(s: &str) -> String {
-    let re = regex_lite::Regex::new(r"\x1b\[\?[0-9;]*[hlsur]").unwrap();
-    re.replace_all(s, |caps: &regex_lite::Captures| {
+    // Runs on every PTY read: skip the regex (a slow scan in regex-lite) when there's
+    // nothing to match, and compile it once.
+    if !s.contains("\x1b[?") {
+        return s.to_string();
+    }
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\[\?[0-9;]*[hlsur]").unwrap());
+    RE.replace_all(s, |caps: &regex_lite::Captures| {
         let m = caps.get(0).unwrap().as_str();
         // CSI ? u is the kitty keyboard protocol's flags query — the terminal answers it.
         if m == "\x1b[?u" { return m.to_string(); }
@@ -87,8 +98,12 @@ pub fn is_tui_command(cmd: &str) -> bool {
 /// Strip OSC 133 shell integration sequences (command boundary markers).
 /// These are emitted by daimon's zsh integration and must not appear in rendered output.
 pub fn strip_osc133(s: &str) -> String {
-    let re = regex_lite::Regex::new(r"\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)").unwrap();
-    re.replace_all(s, "").into_owned()
+    // Runs on every PTY read: see strip_pty_modes.
+    if !s.contains("\x1b]133;") {
+        return s.to_string();
+    }
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)").unwrap());
+    RE.replace_all(s, "").into_owned()
 }
 
 fn matches_prefix(cmd: &str, prefixes: &[&str]) -> bool {

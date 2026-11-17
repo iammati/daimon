@@ -140,13 +140,23 @@ struct SessionState {
 const REPLAY_LIMIT: usize = 2 << 20;
 
 impl SessionState {
+    /// Keep the last REPLAY_LIMIT bytes. Trims only once the buffer reaches twice that, so
+    /// the move is amortised: PTY reads are a few hundred bytes, and shifting 2 MB on every
+    /// one of them made this the daemon's hottest spot.
     fn push_output(&mut self, data: &str) {
         self.output.push_str(data);
-        if self.output.len() > REPLAY_LIMIT {
+        if self.output.len() > 2 * REPLAY_LIMIT {
             let mut cut = self.output.len() - REPLAY_LIMIT;
             while !self.output.is_char_boundary(cut) { cut += 1; }
             self.output.drain(..cut);
         }
+    }
+
+    /// The replayable tail (at most REPLAY_LIMIT bytes).
+    fn replay_tail(&self) -> &str {
+        let mut cut = self.output.len().saturating_sub(REPLAY_LIMIT);
+        while !self.output.is_char_boundary(cut) { cut += 1; }
+        &self.output[cut..]
     }
 }
 
@@ -167,6 +177,10 @@ impl Modes {
         static KITTY: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
         let priv_re = PRIV.get_or_init(|| regex_lite::Regex::new(r"\x1b\[\?([0-9;]+)([hl])").unwrap());
         let kitty_re = KITTY.get_or_init(|| regex_lite::Regex::new(r"\x1b\[([><=])([0-9]*)(?:;([0-9]*))?u").unwrap());
+        // Runs on every PTY read: only scan (slow in regex-lite) when a match is possible.
+        let has_priv = s.contains("\x1b[?");
+        let has_kitty = s.contains("\x1b[>") || s.contains("\x1b[<") || s.contains("\x1b[=");
+        if !has_priv && !has_kitty { return; }
         for c in priv_re.captures_iter(s) {
             let on = &c[2] == "h";
             for code in c[1].split(';').filter_map(|n| n.parse::<u16>().ok()) {
@@ -457,7 +471,7 @@ impl Session {
             } else if s.alt_screen {
                 s.modes.prelude(true)
             } else {
-                format!("{}{}", s.modes.prelude(false), s.output)
+                format!("{}{}", s.modes.prelude(false), s.replay_tail())
             },
             context: s.context.clone(),
         }

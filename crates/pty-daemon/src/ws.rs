@@ -6,14 +6,25 @@ use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+/// How long the event bus waits on one client before giving up on it.
+const STALL_LIMIT: Duration = Duration::from_secs(10);
+
+/// A connected WebSocket client: its event queue, and a signal that closes its connection.
+#[derive(Clone)]
+struct Client {
+    tx: mpsc::Sender<SessionEvent>,
+    kill: Arc<Notify>,
+}
 
 pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -> Result<()> {
     let db = Arc::new(db);
@@ -23,14 +34,34 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
     let (event_tx, event_rx) = mpsc::channel::<SessionEvent>(1024);
     let mgr = Arc::new(Mutex::new(SessionManager::new(event_tx.clone())));
 
-    // Broadcast task: fan out session events to all connected clients
-    let clients: Arc<Mutex<Vec<mpsc::Sender<SessionEvent>>>> = Arc::new(Mutex::new(vec![]));
+    // Broadcast task: fan out session events to all connected clients.
+    // A client that falls behind gets backpressure, like any terminal: the bus waits for
+    // it, the PTY readers block, and the program producing output pauses. Dropping events
+    // (or the client) instead would leave the UI connected but no longer receiving output.
+    // Only a client that takes no event for STALL_LIMIT is dropped; its connection is
+    // closed so it reconnects instead of hanging.
+    let clients: Arc<Mutex<Vec<Client>>> = Arc::new(Mutex::new(vec![]));
     let clients_bcast = clients.clone();
     tokio::spawn(async move {
         let mut rx = event_rx;
         while let Some(ev) = rx.recv().await {
-            let mut list = clients_bcast.lock().await;
-            list.retain(|tx| tx.try_send(ev.clone()).is_ok());
+            // Snapshot so a waiting send doesn't hold the lock against new connections.
+            let snapshot = clients_bcast.lock().await.clone();
+            let mut gone: Vec<mpsc::Sender<SessionEvent>> = vec![];
+            for c in &snapshot {
+                match tokio::time::timeout(STALL_LIMIT, c.tx.send(ev.clone())).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => gone.push(c.tx.clone()),
+                    Err(_) => {
+                        warn!("client stalled for {STALL_LIMIT:?}, disconnecting it");
+                        c.kill.notify_one();
+                        gone.push(c.tx.clone());
+                    }
+                }
+            }
+            if !gone.is_empty() {
+                clients_bcast.lock().await.retain(|c| !gone.iter().any(|g| g.same_channel(&c.tx)));
+            }
         }
     });
 
@@ -44,7 +75,8 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
         let db = db.clone();
         let token = token.clone();
         let (client_tx, mut client_rx) = mpsc::channel::<SessionEvent>(256);
-        clients.lock().await.push(client_tx.clone());
+        let kill = Arc::new(Notify::new());
+        clients.lock().await.push(Client { tx: client_tx.clone(), kill: kill.clone() });
 
         tokio::spawn(async move {
             // Every client must present the token (?token=…): the daemon runs shells, and
@@ -71,7 +103,10 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
                 }
             });
 
-            while let Some(Ok(msg)) = source.next().await {
+            while let Some(Ok(msg)) = tokio::select! {
+                m = source.next() => m,
+                _ = kill.notified() => None,
+            } {
                 if let Message::Text(text) = msg {
                     let cmd: Result<SessionCommand, _> = serde_json::from_str(&text);
                     match cmd {
