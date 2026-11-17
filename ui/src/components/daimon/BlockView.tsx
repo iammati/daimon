@@ -2801,7 +2801,7 @@ function LinkCard({ p }: { p: LinkPreview }) {
   );
 }
 
-export function BlockView({ block, modeActive = false, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; modeActive?: boolean; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
+function BlockViewImpl({ block, modeActive = false, onRerun, isLast, currentCtx = "", sessionId = "", isTuiActive = false, gazeFocused = false, promptingForInput = false, onSearch, onPathClick }: { block: Block; modeActive?: boolean; onRerun: (cmd: string) => void; isLast?: boolean; currentCtx?: string; sessionId?: string; isTuiActive?: boolean; gazeFocused?: boolean; promptingForInput?: boolean; onSearch?: ((q: string) => void) | null; onPathClick?: (path: string) => void }) {
   const ok = block.code === 0;
   const failed = !block.pending && !ok;
   const [expanded, setExpandedRaw] = useState(true);
@@ -3031,3 +3031,16 @@ export function BlockView({ block, modeActive = false, onRerun, isLast, currentC
     </article>
   );
 }
+
+/**
+ * Blocks re-render only when their own data changes: the session's state updates on every
+ * frame of a running command, and re-rendering every finished block each time made output
+ * slower the longer the session's history. Callback props are ignored — callers pass ones
+ * that stay valid (see submitRef in routes/index.tsx).
+ */
+export const BlockView = React.memo(BlockViewImpl, (a, b) => {
+  for (const k of Object.keys(a) as (keyof typeof a)[]) {
+    if (typeof a[k] !== "function" && a[k] !== b[k]) return false;
+  }
+  return Object.keys(a).length === Object.keys(b).length;
+});
