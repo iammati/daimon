@@ -176,9 +176,16 @@ function applyBackspace(s: string): string {
   return out;
 }
 
+/** A control character other than tab/newline, or an escape that isn't a plain SGR colour code. */
+const NOT_ONLY_SGR_RE = /[\x00-\x08\x0b-\x1a\x1c-\x1f]|\x1b(?!\[[0-9;]*m)/;
+const SGR_STRIP_RE = /\x1b\[[0-9;]*m/g;
+
 const ANSI = (s: string) =>
   // Nothing to strip without a control character (tab and newline are kept).
-  !/[\x00-\x08\x0b-\x1f]/.test(s) ? s : applyBackspace(s)
+  !/[\x00-\x08\x0b-\x1f]/.test(s) ? s
+  // Only colour codes (most coloured output): the chain below would remove just those.
+  : !NOT_ONLY_SGR_RE.test(s) ? s.replace(SGR_STRIP_RE, "")
+  : applyBackspace(s)
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b[()][AB012B]/g, "")
@@ -213,8 +220,35 @@ type Sgr = { fg: string; bg: string; bold: boolean; dim: boolean; italic: boolea
 const SGR_NONE: Sgr = { fg: "", bg: "", bold: false, dim: false, italic: false, underline: false };
 const SGR_RE = /\x1b\[([0-9;]*)m/g;
 
+// Coloured output repeats a few attribute combinations endlessly, so both steps below are
+// cached: states are interned (equal attributes → the same object), which lets each
+// (state, params) → state step and each state's CSS be looked up instead of recomputed.
+const sgrInterned = new Map<string, Sgr>();
+const sgrSteps = new WeakMap<Sgr, Map<string, Sgr>>();
+const sgrCssCache = new WeakMap<Sgr, string>();
+const SGR_CACHE_MAX = 4096;   // distinct states; truecolor gradients could otherwise grow it
+
+function sgrIntern(s: Sgr): Sgr {
+  const key = `${s.fg}|${s.bg}|${+s.bold}${+s.dim}${+s.italic}${+s.underline}`;
+  const known = sgrInterned.get(key);
+  if (known) return known;
+  if (sgrInterned.size >= SGR_CACHE_MAX) sgrInterned.clear();
+  sgrInterned.set(key, s);
+  return s;
+}
+
 /** `s` after one SGR sequence with the parameters `params` ("1;33"). */
 function sgrApply(s: Sgr, params: string): Sgr {
+  let steps = sgrSteps.get(s);
+  const hit = steps?.get(params);
+  if (hit) return hit;
+  const next = sgrIntern(sgrApplyUncached(s, params));
+  if (!steps) sgrSteps.set(s, (steps = new Map()));
+  if (steps.size < 64) steps.set(params, next);
+  return next;
+}
+
+function sgrApplyUncached(s: Sgr, params: string): Sgr {
   const codes = params.split(";").map(Number);   // "" → [0], a reset
   const n = { ...s };
   for (let i = 0; i < codes.length; i++) {
@@ -265,6 +299,12 @@ function sgrColor(v: string, fallback: string): string {
 }
 
 function sgrCss(s: Sgr): string {
+  let css = sgrCssCache.get(s);
+  if (css === undefined) sgrCssCache.set(s, (css = sgrCssUncached(s)));
+  return css;
+}
+
+function sgrCssUncached(s: Sgr): string {
   let style = "";
   if (s.bold) style += "font-weight:600;";
   if (s.dim) style += "opacity:0.7;";
@@ -282,7 +322,8 @@ const ansiHtmlClose = (st: AnsiHtmlState) => (st.open ? "</span>" : "") + (st.li
 
 /** Convert one piece of text, continuing from `st`. Close with ansiHtmlClose() after the last piece. */
 function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
-  const s = applyBackspace(raw)
+  // Only colour codes (most coloured output): none of the replacements below would match.
+  const s = !NOT_ONLY_SGR_RE.test(raw) ? raw : applyBackspace(raw)
     .replace(/\x1b\](?!8;)[^\x07\x1b]*(?:\x07|\x1b\\)/g, "")   // OSC 8 (hyperlinks) handled below
     .replace(/(\x1b\]8;[^\x07\x1b]*)\x07/g, "$1\x1b\\")              // …BEL-terminated → ST, so the control-char strip keeps them whole
     .replace(/\x1b[()][AB012B]/g, "")
@@ -902,7 +943,9 @@ class OutputStream {
   private addRaw(l: string): void {
     if (l.includes("\x1b]1337;File=") || hasOpenOsc(l) || backspaceUnderflows(l)) { this.complex = true; return; }
     const text = ANSI(l).trim();
-    if (echoKey(text) === this.cmd || PROMPT_RE.test(text)) return;   // command echo / prompt line
+    // Command echo / prompt line. (`text` is trimmed, so its first character is echoKey's:
+    // a mismatch there settles the echo test without stripping the whole line.)
+    if ((text[0] === this.cmd[0] && echoKey(text) === this.cmd) || PROMPT_RE.test(text)) return;
     if (text || paintsBg(l)) this.visible = true;
     if (isBlank(l)) { if (this.started) this.held.push(l); return; }
     for (const h of this.held) this.addDone(renderLine(h, this.carry));
@@ -924,8 +967,11 @@ class OutputStream {
     for (; this.aNext < this.done.length; this.aNext++) {
       const r = this.done[this.aNext]!;
       // A line holds no "\n", so its html is the same with or without the separator.
+      const before = this.aState.open || this.aState.linkOpen;
       const lineHtml = ansiHtmlChunk(r, this.aState);
-      this.aLines.push(splitHtmlLines(lineHtml, this.aLinesOpen)[0]!);
+      // Nothing open before or after: the line is self-contained as converted (no tag scan).
+      if (!before && !this.aState.open && !this.aState.linkOpen && !this.aLinesOpen.length) this.aLines.push(lineHtml);
+      else this.aLines.push(splitHtmlLines(lineHtml, this.aLinesOpen)[0]!);
       const piece = (this.aNext > 0 ? "\n" : "") + lineHtml;
       const kept = piece.trimEnd();
       if (!kept) this.aWs += piece;
