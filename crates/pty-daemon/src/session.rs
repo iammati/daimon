@@ -294,7 +294,6 @@ pub struct Session {
     pub tab_id: String,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
-    event_tx: mpsc::Sender<SessionEvent>,
     state: Arc<Mutex<SessionState>>,
 }
 
@@ -350,7 +349,7 @@ impl Session {
 
         let writer = Arc::new(Mutex::new(writer));
         let state = Arc::new(Mutex::new(SessionState { size: (120, 24), ..Default::default() }));
-        let tx = event_tx.clone();
+        let tx = event_tx;
         let tid = tab_id.clone();
         let reply_writer = writer.clone();
         let st = state.clone();
@@ -442,7 +441,7 @@ impl Session {
             let _ = tx.blocking_send(SessionEvent::Exit { tab_id: tid, code });
         });
 
-        Ok(Self { tab_id, writer, master, event_tx, state })
+        Ok(Self { tab_id, writer, master, state })
     }
 
     pub fn write(&self, data: &str, command: Option<String>) -> Result<()> {
