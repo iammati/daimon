@@ -295,6 +295,18 @@ export function gitLogArgs(input: string): string[] | null {
   return args;
 }
 
+/**
+ * A finished command. `outputJson`: its output as JSON for saving, when the parse worker made
+ * it. `complete`: the block shows the end of a long output for now; this is the whole of it.
+ */
+export type RunResult = {
+  block: Block;
+  next: State;
+  clear?: boolean;
+  outputJson?: Promise<string>;
+  complete?: Promise<{ out: Out[]; outputJson?: Promise<string> }>;
+};
+
 export async function run(
   raw: string,
   state: State,
@@ -302,7 +314,7 @@ export async function run(
   onProgress: (block: Block) => void,
   /** Pick up a command that's already running in the daemon (after the UI restarted). */
   resume?: AttachInfo,
-): Promise<{ block: Block; next: State; clear?: boolean }> {
+): Promise<RunResult> {
   const input = raw.trim();
 
   if (!input && !resume) {
@@ -479,7 +491,7 @@ export async function run(
     }
   }
 
-  return new Promise<{ block: Block; next: State; clear?: boolean }>((resolve) => {
+  return new Promise<RunResult>((resolve) => {
     globalOutputOff?.(); globalContextOff?.(); globalExitOff?.(); globalCommandStartOff?.();
 
     globalOutputOff = shell.onOutput((tid, data) => {
@@ -587,7 +599,16 @@ export async function run(
       maybeNotify(input, ms);
       // The parser has followed all of the output already (falling back to a full parse
       // itself for output it can't follow); the finished, capped result is a message away.
-      void parser.final().then((out) => {
+      // The end of a long output is on screen already: finish the block with the latest live
+      // view and swap in the complete output (head + capped tail) when the parser has it —
+      // the command is done the moment its output is, as in any terminal. A short output's
+      // live view is the whole output: finish with the parser's final result directly.
+      perf.finalAskAt = performance.now();
+      const liveNow = parser.latest(LIVE_WINDOW);
+      const complete = parser.final();
+      void liveNow.then(({ out: live, partial }) => (partial ? finish(live, complete) : complete.then((out) => finish(out))));
+      const finish = (out: Out[], later?: Promise<Out[]>) => {
+        perf.finalGotAt = performance.now();
         const gb = finalCtx?.gitBranch ?? state.gitBranch;
         const nextState: State = {
           cwd: finalCtx?.pwd ? finalCtx.pwd.split("/").filter(Boolean) : state.cwd,
@@ -604,16 +625,21 @@ export async function run(
         const cancelledOut: Out[] = wasCancelled
           ? [{ kind: "lines", lines: ["✕ cancelled"], tone: "bad" }]
           : [];
+        const shown = (o: Out[]): Out[] => wasCancelled
+          ? [...o, ...cancelledOut]
+          : (o.length ? o : (cmdCode !== 0 && !detectedTUI) ? [{ kind: "lines", lines: ["(no output)"], tone: "muted" }] : []);
         const finalBlock: Block = {
           ...pendingBlock, ms, code: wasCancelled ? 130 : cmdCode,
           ctx: finalCtx?.k8sContext ?? state.ctx.name,
-          out: wasCancelled
-            ? [...out, ...cancelledOut]
-            : (out.length ? out : (cmdCode !== 0 && !detectedTUI) ? [{ kind: "lines", lines: ["(no output)"], tone: "muted" }] : []),
+          out: shown(out),
           pending: false,
         };
-        resolve({ block: finalBlock, next: nextState });
-      });
+        perf.resolvedAt = performance.now();
+        // The worker encodes its output for saving; only usable if the block shows exactly that.
+        const json = (o: Out[]) => (shown(o) === o ? { outputJson: parser.outputJson() } : {});
+        if (!later) { resolve({ block: finalBlock, next: nextState, ...json(out) }); return; }
+        resolve({ block: finalBlock, next: nextState, complete: later.then((o) => ({ out: shown(o), ...json(o) })) });
+      };
     }
 
     activeCleanups.set(tabId, cleanup);

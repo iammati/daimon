@@ -9,7 +9,7 @@ import { perf, shell } from "./rpc";
 import { lastWorkerStats } from "./parseClient";
 
 type Spec = { cmds: string[]; reps?: number; warmupMs?: number };
-type Api = { submit: (cmd: string) => Promise<void>; busy: () => boolean };
+type Api = { submit: (cmd: string) => Promise<void>; busy: () => boolean; lastBlockMs: () => number | null };
 
 const spec: Spec | null = (() => {
   try {
@@ -93,6 +93,13 @@ export function startBench(api: () => Api) {
           listeners_ms: r1(perf.outputMs - p0.outputMs),
           snapshot_ms: r1(perf.paintMs - p0.paintMs),
           worker: lastWorkerStats ? Object.fromEntries(Object.entries(lastWorkerStats).map(([k, v]) => [k, r1(v)])) : null,
+          // The command's own duration (shell markers) — like `time cat` in another terminal.
+          command_ms: api().lastBlockMs(),
+          // After the last output: prompt event, final output asked / received, block resolved
+          prompt_ms: r1(perf.promptAt - t0),
+          final_ask_ms: r1(perf.finalAskAt - t0),
+          final_got_ms: r1(perf.finalGotAt - t0),
+          resolved_ms: r1(perf.resolvedAt - t0),
           block_ms: r1(tBlock - t0),
           painted_ms: r1(tPainted - t0),
           frames: gaps.length,
@@ -103,6 +110,8 @@ export function startBench(api: () => Api) {
         });
       }
     }
+    // Let the last block's complete output arrive and be saved before reporting (and being closed).
+    await sleep(1500);
     const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
     const out = JSON.stringify({
       ua: navigator.userAgent,

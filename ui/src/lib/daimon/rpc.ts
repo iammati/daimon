@@ -107,7 +107,7 @@ let failures = 0;
 let everConnected = false;
 
 /** Main-thread time spent on daemon messages (read by bench mode, see bench.ts). */
-export const perf = { msgs: 0, parseMs: 0, outputMs: 0, paintMs: 0 };
+export const perf = { msgs: 0, parseMs: 0, outputMs: 0, paintMs: 0, promptAt: 0, finalAskAt: 0, finalGotAt: 0, resolvedAt: 0 };
 const reconnectListeners = new Set<() => void>();
 
 /** Called after the connection to the daemon came back (not on the first connect). */
@@ -157,6 +157,7 @@ async function connect() {
       if (ev.context) {
         try { ctx = JSON.parse(ev.context); } catch { /* bare prompt */ }
       }
+      perf.promptAt = performance.now();
       lastContext.set(ev.tab_id, ctx);
       contextListeners.forEach((fn) => fn(ev.tab_id, ctx));
     } else if (ev.type === "commandStart") {

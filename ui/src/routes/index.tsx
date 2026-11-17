@@ -1010,6 +1010,11 @@ function Daimon() {
     await runBlock(sessionId, cmd, sess.state);
   };
 
+  // BlockView is memoized and ignores callback props, so the ones given to it call the
+  // current submit through this ref instead of capturing the render's.
+  const submitRef = useRef(submit);
+  submitRef.current = submit;
+
   /**
    * Run `cmd` as a new block in a session — or, with `resume`, show a command that is
    * already running in the daemon (the UI restarted while it ran) as that block.
@@ -1028,7 +1033,7 @@ function Daimon() {
       } : s));
     }, resume);
     window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } }));
-    const { block, next, clear } = await runPromise;
+    const { block, next, clear, outputJson, complete } = await runPromise;
     setSessions((prev) => prev.map((s) => {
       if (s.id !== sessionId) return s;
       const newBlocks = clear ? [] : s.blocks.map((x) => x.id === pendingId ? { ...block, id: pendingId } : x);
@@ -1036,8 +1041,10 @@ function Daimon() {
     }));
     // Persist once the finished block is on screen: encoding a big block's output takes a
     // while, and it used to run inside the state update, ahead of the paint.
-    const persist = () => {
+    const persist = async (out: typeof block.out, json?: Promise<string>) => {
       if (clear) { shell.blockClear(sessionId).catch(() => {}); return; }
+      // Encoded by the parse worker when the block shows exactly its output.
+      const output_json = json ? await json : JSON.stringify(out ?? []);
       shell.blockSave({
         id: block.id ?? pendingId,
         session_id: sessionId,
@@ -1046,20 +1053,31 @@ function Daimon() {
         ctx: block.ctx ?? "",
         ts: block.ts ?? Date.now(),
         exit_code: block.code ?? 0,
-        output_json: JSON.stringify(block.out ?? []),
+        output_json,
       }).catch(() => {});
     };
-    requestAnimationFrame(() => setTimeout(persist, 0));
+    if (complete) {
+      // The block shows the end of a long output; the whole of it follows from the parser.
+      void complete.then(({ out, outputJson: json }) => {
+        setSessions((prev) => prev.map((s) => s.id !== sessionId ? s : {
+          ...s, blocks: s.blocks.map((x) => x.id === pendingId ? { ...x, out } : x),
+        }));
+        requestAnimationFrame(() => setTimeout(() => void persist(out, json), 0));
+      });
+    } else {
+      requestAnimationFrame(() => setTimeout(() => void persist(block.out, outputJson), 0));
+    }
     followRef.current.set(sessionId, true);
     scrollToBottom(sessionId);
     setTimeout(() => window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } })), 1);
   };
 
   // Benchmark mode (DAIMON_BENCH): drives the active session through the normal submit path.
-  const benchApi = useRef<{ submit: (cmd: string) => Promise<void>; busy: () => boolean }>({ submit: () => Promise.resolve(), busy: () => true });
+  const benchApi = useRef<{ submit: (cmd: string) => Promise<void>; busy: () => boolean; lastBlockMs: () => number | null }>({ submit: () => Promise.resolve(), busy: () => true, lastBlockMs: () => null });
   benchApi.current = {
     submit: (cmd: string) => submit(cmd),
     busy: () => (sessions.find((s) => s.id === activeId) ?? sessions[0]!).blocks.some((b) => b.pending),
+    lastBlockMs: () => (sessions.find((s) => s.id === activeId) ?? sessions[0]!).blocks.at(-1)?.ms ?? null,
   };
   useEffect(() => { startBench(() => benchApi.current); }, []);
 
@@ -1112,7 +1130,7 @@ function Daimon() {
                     onMouseEnter={() => { if (!pagerActive) setHoveredBlockId(b.id); if (!isFocused) setFocusedPane(splitSessionId && paneSessionId === splitSessionId ? "right" : "left"); }}
                     onMouseLeave={() => setHoveredBlockId(null)}
                   >
-                    <BlockView block={b} modeActive={effectiveHoveredBlockId === b.id && effectiveBlockModActive} onRerun={(cmd) => submit(cmd, paneSessionId)} isLast={i === pane.blocks.length - 1} currentCtx={pane.state.ctx.name} sessionId={pane.id} isTuiActive={tuiBlockIds.get(pane.id) === b.id} promptingForInput={panePrompting && !!b.pending} onSearch={(q) => { setGlobalSearchQuery(q); setGlobalSearchOpen(true); }} onPathClick={(path) => { const expanded = path.startsWith("~") ? __HOME__ + path.slice(1) : path; const hasExt = /\.[^/]+$/.test(expanded.split("/").pop() ?? ""); const dir = hasExt ? expanded.split("/").slice(0, -1).join("/") || "/" : expanded; submit("cd " + JSON.stringify(dir), paneSessionId); toast("cd " + dir, { duration: 2000 }); }} />
+                    <BlockView block={b} modeActive={effectiveHoveredBlockId === b.id && effectiveBlockModActive} onRerun={(cmd) => submitRef.current(cmd, paneSessionId)} isLast={i === pane.blocks.length - 1} currentCtx={pane.state.ctx.name} sessionId={pane.id} isTuiActive={tuiBlockIds.get(pane.id) === b.id} promptingForInput={panePrompting && !!b.pending} onSearch={(q) => { setGlobalSearchQuery(q); setGlobalSearchOpen(true); }} onPathClick={(path) => { const expanded = path.startsWith("~") ? __HOME__ + path.slice(1) : path; const hasExt = /\.[^/]+$/.test(expanded.split("/").pop() ?? ""); const dir = hasExt ? expanded.split("/").slice(0, -1).join("/") || "/" : expanded; submitRef.current("cd " + JSON.stringify(dir), paneSessionId); toast("cd " + dir, { duration: 2000 }); }} />
                   </div>
                 ))}
               </div>

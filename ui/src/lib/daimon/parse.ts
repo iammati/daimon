@@ -336,6 +336,14 @@ const earlierLines = (n: number) => `… ${n.toLocaleString("en-US")} earlier li
 const escapeHtml = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /** Trim a finished block's output to KEEP_HEAD_LINES + KEEP_TAIL_LINES (plain and ANSI text). */
+/** Live views that show only the end of a longer output (see LIVE_WINDOW). */
+const PARTIAL = new WeakSet<Out>();
+export const isPartial = (o: Out) => PARTIAL.has(o);
+
+/** "ansi" outputs whose html is exactly their lines joined with "\n" (see the parse worker). */
+const HTML_IS_LINES = new WeakSet<Out>();
+export const htmlIsLines = (o: Out) => HTML_IS_LINES.has(o);
+
 /** Outputs built capped already (OutputStream.final), which capOutput leaves alone. */
 const CAPPED = new WeakSet<Out>();
 
@@ -361,6 +369,7 @@ export function capOutput(out: Out[]): Out[] {
       const lines = [...all.slice(0, KEEP_HEAD_LINES), escapeHtml(omitted(n)), ...all.slice(-KEEP_TAIL_LINES)];
       const capped: Out = { kind: "ansi", html: lines.join("\n") };
       Object.defineProperty(capped, "lines", { value: lines, enumerable: false });
+      HTML_IS_LINES.add(capped);
       return capped;
     }
     return o;
@@ -922,6 +931,7 @@ export class OutputStream {
     const withLines = (html: string, lines: string[]): Out[] => {
       const out: Out = { kind: "ansi", html };
       Object.defineProperty(out, "lines", { value: lines, enumerable: false });
+      HTML_IS_LINES.add(out);
       return [out];
     };
     if (liveLines && count > liveLines) {
@@ -929,7 +939,9 @@ export class OutputStream {
       const keep = Math.max(0, liveLines - 1 - openLines.length);
       const lines = [escapeHtml(earlierLines(this.done.length - keep)), ...linesFrom(this.done.length - keep, count)];
       if (lazy) this.trimLazyCache(this.done.length - KEEP_TAIL_LINES - liveLines);
-      return withLines(lines.join("\n"), lines);
+      const out = withLines(lines.join("\n"), lines);
+      PARTIAL.add(out[0]!);
+      return out;
     }
     if (final && count > KEEP_HEAD_LINES + KEEP_TAIL_LINES) {
       // The finished block, capped (= capOutput of the full output), converting only what it keeps.
@@ -952,7 +964,10 @@ export class OutputStream {
   private convertFinished(): void {
     if (this.lazyFrom >= 0 && this.lastLink >= this.lazyFrom) this.materialize();
     for (; this.aNext < this.done.length; this.aNext++) {
-      if (this.lazyFrom >= 0 || (!this.noLazy && this.aNext >= KEEP_HEAD_LINES && this.color && this.diff === false && !this.aState.linkOpen)) {
+      // Lazy only once the live view is a window (> LIVE_WINDOW lines): a full live snapshot
+      // needs every line's html, which would undo it.
+      if (this.lazyFrom >= 0 || (!this.noLazy && this.aNext >= KEEP_HEAD_LINES && this.done.length > LIVE_WINDOW
+          && this.color && this.diff === false && !this.aState.linkOpen)) {
         if (this.lazyFrom < 0) this.lazyFrom = this.aNext;
         continue;   // converted when needed (lineHtml)
       }
@@ -1100,7 +1115,9 @@ export class OutputStream {
     if (liveLines && lines.length + end.length > liveLines) {
       // Live view of a long output: just its end.
       const keep = Math.max(0, liveLines - 1 - end.length);
-      return [{ kind: "lines", lines: [earlierLines(lines.length - keep), ...lines.slice(lines.length - keep), ...end] }];
+      const out: Out = { kind: "lines", lines: [earlierLines(lines.length - keep), ...lines.slice(lines.length - keep), ...end] };
+      PARTIAL.add(out);
+      return [out];
     }
     return [{ kind: "lines", lines: [...lines, ...end] }];
   }
