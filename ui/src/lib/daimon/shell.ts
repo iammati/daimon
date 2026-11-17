@@ -334,6 +334,15 @@ function ansiHtmlChunk(raw: string, st: AnsiHtmlState): string {
  * It is updated in place to those in effect after it, so text can be split piece by piece.
  */
 export function splitHtmlLines(html: string, open: string[] = []): string[] {
+  // One line that starts and ends with nothing open is already self-contained: return it
+  // as is rather than an equal copy (the stream keeps both, for every line).
+  if (!open.length && !html.includes("\n")) {
+    for (const m of html.matchAll(/<\/?[a-z][^>]*>/gi)) {
+      if (m[0][1] === "/") open.pop(); else open.push(m[0]);
+    }
+    if (!open.length) return [html];
+    open.length = 0; // unbalanced: take the general path from the same start
+  }
   const lines: string[] = [];
   let cur = open.join("");
   const close = () => open.slice().reverse().map((t) => (t.startsWith("<a") ? "</a>" : "</span>")).join("");
@@ -357,6 +366,15 @@ const KEEP_HEAD_LINES = 1_000;
 const KEEP_TAIL_LINES = 50_000;
 const omitted = (n: number) => `… ${n.toLocaleString("en-US")} lines omitted …`;
 
+/**
+ * While a command runs, its block shows only the last LIVE_WINDOW lines. Rendering (and
+ * re-laying out) every line of a huge output on every frame is where the memory went;
+ * the finished block has all of it (up to the cap above).
+ */
+export const LIVE_WINDOW = 5_000;
+const earlierLines = (n: number) => `… ${n.toLocaleString("en-US")} earlier lines — all shown when the command finishes …`;
+const escapeHtml = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 /** Trim a finished block's output to KEEP_HEAD_LINES + KEEP_TAIL_LINES (plain and ANSI text). */
 export function capOutput(out: Out[]): Out[] {
   return out.map((o) => {
@@ -365,13 +383,21 @@ export function capOutput(out: Out[]): Out[] {
       return { ...o, lines: [...o.lines.slice(0, KEEP_HEAD_LINES), omitted(n), ...o.lines.slice(-KEEP_TAIL_LINES)] };
     }
     if (o.kind === "ansi") {
-      // Count before splitting: most output is far below the cap.
-      let count = 1;
-      for (let i = o.html.indexOf("\n"); i >= 0 && count <= KEEP_HEAD_LINES + KEEP_TAIL_LINES; i = o.html.indexOf("\n", i + 1)) count++;
-      if (count <= KEEP_HEAD_LINES + KEEP_TAIL_LINES) return o;
-      const lines = splitHtmlLines(o.html);
-      const n = lines.length - KEEP_HEAD_LINES - KEEP_TAIL_LINES;
-      return { ...o, html: [...lines.slice(0, KEEP_HEAD_LINES), omitted(n), ...lines.slice(-KEEP_TAIL_LINES)].join("\n") };
+      if (o.lines) {
+        // The stream's per-line html: no need to look at (or flatten) the html string.
+        if (o.lines.length <= KEEP_HEAD_LINES + KEEP_TAIL_LINES) return o;
+      } else {
+        // Count before splitting: most output is far below the cap.
+        let count = 1;
+        for (let i = o.html.indexOf("\n"); i >= 0 && count <= KEEP_HEAD_LINES + KEEP_TAIL_LINES; i = o.html.indexOf("\n", i + 1)) count++;
+        if (count <= KEEP_HEAD_LINES + KEEP_TAIL_LINES) return o;
+      }
+      const all = o.lines ?? splitHtmlLines(o.html);
+      const n = all.length - KEEP_HEAD_LINES - KEEP_TAIL_LINES;
+      const lines = [...all.slice(0, KEEP_HEAD_LINES), escapeHtml(omitted(n)), ...all.slice(-KEEP_TAIL_LINES)];
+      const capped: Out = { kind: "ansi", html: lines.join("\n") };
+      Object.defineProperty(capped, "lines", { value: lines, enumerable: false });
+      return capped;
     }
     return o;
   });
@@ -854,7 +880,7 @@ class OutputStream {
   }
 
   /** The parsed output of everything pushed so far. `raw` is that same text, for the fallback. */
-  snapshot(raw: string): Out[] {
+  snapshot(raw: string, window?: number): Out[] {
     if (this.complex) return parseOutput(raw, this.input);
     const tail = this.tail;
     if (tail.includes("\x1b]1337;File=") || backspaceUnderflows(tail)) return parseOutput(raw, this.input);
@@ -869,7 +895,7 @@ class OutputStream {
     for (let i = 0; i < open.length; i++) {
       if (open[i]!.includes("\x08") || (i < open.length - 1 && hasOpenOsc(open[i]!))) return parseOutput(raw, this.input);
     }
-    return this.color || open.some(hasColor) ? this.ansiOut(open) : this.plainOut(open);
+    return this.color || open.some(hasColor) ? this.ansiOut(open, window) : this.plainOut(open, window);
   }
 
   /** One finished raw line. */
@@ -894,7 +920,7 @@ class OutputStream {
     this.done.push(r);
   }
 
-  private ansiOut(open: string[]): Out[] {
+  private ansiOut(open: string[], window?: number): Out[] {
     for (; this.aNext < this.done.length; this.aNext++) {
       const r = this.done[this.aNext]!;
       // A line holds no "\n", so its html is the same with or without the separator.
@@ -905,6 +931,8 @@ class OutputStream {
       if (!kept) this.aWs += piece;
       else if (!this.aCore) { this.aCore = (this.aWs + kept).trimStart(); this.aWs = piece.slice(kept.length); }
       else { this.aCore += this.aWs + kept; this.aWs = piece.slice(kept.length); }
+      // Coloured output never goes back to the plain path: the raw line isn't needed again.
+      if (this.color) this.done[this.aNext] = "";
       if (this.diff === false) continue;
       const text = ANSI(r);
       if (!isBlank(text)) {
@@ -926,16 +954,26 @@ class OutputStream {
     }
     const st = { ...this.aState };
     const openHtml = ansiHtmlChunk(open.join("\n"), st) + ansiHtmlClose(st);
+    const openLines = open.length ? splitHtmlLines(openHtml, [...this.aLinesOpen]) : [];
+    if (window && this.aLines.length + openLines.length > window) {
+      // Live view of a long output: just its end, built from the per-line html.
+      const keep = Math.max(0, window - 1 - openLines.length);
+      const skipped = this.aLines.length - keep;
+      const lines = [escapeHtml(earlierLines(skipped)), ...this.aLines.slice(-keep), ...openLines];
+      const out: Out = { kind: "ansi", html: lines.join("\n") };
+      Object.defineProperty(out, "lines", { value: lines, enumerable: false });
+      return [out];
+    }
     // = (finished html + "\n" + openHtml).trim(), touching only the small end.
     const end = (this.aNext > 0 ? this.aWs + "\n" : "") + openHtml;
     const html = this.aCore ? this.aCore + end.trimEnd() : end.trim();
     const out: Out = { kind: "ansi", html };
-    const lines = open.length ? [...this.aLines, ...splitHtmlLines(openHtml, [...this.aLinesOpen])] : this.aLines.slice();
+    const lines = [...this.aLines, ...openLines];
     Object.defineProperty(out, "lines", { value: lines, enumerable: false });
     return [out];
   }
 
-  private plainOut(open: string[]): Out[] {
+  private plainOut(open: string[], window?: number): Out[] {
     // Everything before the last non-blank finished line is final; that line may still turn
     // out to be the end of the text (and lose its trailing whitespace), so it stays open.
     if (this.first >= 0) {
@@ -996,6 +1034,11 @@ class OutputStream {
       if (yamlVerdict(scan)) return [{ kind: "pretty", format: "yaml", text: text() }];
     }
 
+    if (window && lines.length + end.length > window) {
+      // Live view of a long output: just its end.
+      const keep = Math.max(0, window - 1 - end.length);
+      return [{ kind: "lines", lines: [earlierLines(lines.length - keep), ...lines.slice(lines.length - keep), ...end] }];
+    }
     return [{ kind: "lines", lines: [...lines, ...end] }];
   }
 
@@ -1091,9 +1134,23 @@ export function getTuiReplayBuffer(tabId: string): string[] {
   return replayBufMap.get(tabId) ?? [];
 }
 
-function startReplay(tabId: string) { replayBufMap.set(tabId, []); }
-function appendReplay(tabId: string, data: string) { replayBufMap.get(tabId)?.push(data); }
-function clearReplay(tabId: string) { replayBufMap.delete(tabId); }
+// Only the end is kept (whole chunks, at least REPLAY_KEEP chars): a full-screen program
+// redraws its screen anyway, and the daemon's own reattach replay is capped the same way.
+// Keeping every byte held a second copy of any big output for the whole command.
+const REPLAY_KEEP = 2 << 20;
+const replaySize = new Map<string, number>();
+function startReplay(tabId: string) { replayBufMap.set(tabId, []); replaySize.set(tabId, 0); }
+function appendReplay(tabId: string, data: string) {
+  const buf = replayBufMap.get(tabId);
+  if (!buf) return;
+  buf.push(data);
+  let size = (replaySize.get(tabId) ?? 0) + data.length;
+  let drop = 0;
+  while (drop < buf.length - 1 && size - buf[drop]!.length >= REPLAY_KEEP) size -= buf[drop++]!.length;
+  if (drop) buf.splice(0, drop);
+  replaySize.set(tabId, size);
+}
+function clearReplay(tabId: string) { replayBufMap.delete(tabId); replaySize.delete(tabId); }
 
 // Per-tab ready promises — triggers session open, resolves immediately.
 const readyPromiseMap = new Map<string, Promise<void>>();
@@ -1323,7 +1380,7 @@ export async function run(
     progressQueued = false;
     if (done) return;
     const painted = performance.now();
-    onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf), pending: true });
+    onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf, LIVE_WINDOW), pending: true });
     // A big block can take longer than a frame to lay out. When that happens, leave the UI
     // twice that long to itself before the next update so typing and scrolling stay smooth.
     requestAnimationFrame(() => {
@@ -1434,7 +1491,7 @@ export async function run(
       // Freeze the clock now; what follows is finalisation, not command time.
       tEnd ??= Date.now();
       pendingBlock.settled = true;
-      onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf), pending: true });
+      onProgress({ ...pendingBlock, ms: elapsed(), out: stream.snapshot(normalBuf, LIVE_WINDOW), pending: true });
       // All of the command's output is already here: the daemon sends a chunk's output
       // before its prompt event, over one ordered socket. Finalise on the next tick — a
       // longer wait only kept the block pending (and the composer disabled) for nothing.

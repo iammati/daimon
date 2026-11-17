@@ -154,12 +154,16 @@ function detectLang(input: string, text: string): string | null {
  * is judged on its first 64 KB — except JSON, which needs (and gets) the whole text.
  */
 const LANG_SNIFF = 64 << 10;
-function detectLangHtml(input: string, html: string): string | null {
+function detectLangHtml(input: string, html: string, htmlLines?: string[]): string | null {
   const byName = detectLang(input, "");
   if (byName || !html) return byName;
   const strip = (h: string) => h.replace(/<[^>]+>/g, "");
   if (html.length <= LANG_SNIFF) return detectLang(input, strip(html));
-  const head = strip(html.slice(0, LANG_SNIFF));
+  // While output streams, read the start from the per-line html (slicing the html string
+  // itself would make the engine copy all of it, every frame).
+  let start = "";
+  if (htmlLines) for (let i = 0; i < htmlLines.length && start.length < LANG_SNIFF; i++) start += htmlLines[i] + "\n";
+  const head = strip(htmlLines ? start : html.slice(0, LANG_SNIFF));
   const t = head.trimStart();
   if (t.startsWith("{") || t.startsWith("[")) return detectLang(input, strip(html));
   return detectLang(input, head.slice(0, head.lastIndexOf("\n") + 1 || undefined));
@@ -2246,7 +2250,7 @@ function positionAt(root: Node, chars: number): [Node, number] {
 /** Large ANSI output: only the lines in view are in the DOM. */
 function VirtualHtmlLines({ html, htmlLines }: { html: string; htmlLines?: string[] | undefined }) {
   // The parser hands over the lines while output streams; splitting is for stored blocks.
-  const lines = useMemo(() => htmlLines ?? splitHtmlLines(html), [htmlLines, html]);
+  const lines = useMemo(() => htmlLines ?? splitHtmlLines(html), [htmlLines, htmlLines ? null : html]);
   const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
     count: lines.length,
@@ -2495,7 +2499,8 @@ function SearchableOutput({ html, htmlLines, lines, tone, pm, onSearch, onPathCl
     if (!html || !search) return 0;
     const raw = html.replace(/<[^>]+>/g, "");
     return countMatches(pm ? redact(raw) : raw, search);
-  }, [html, search, pm]);
+  // Only depend on the (possibly huge, every-frame) html while there is a search.
+  }, [search ? html : null, search, pm]);
 
   const matchCount = lines ? totalMatches : htmlMatchCount;
 
@@ -2629,7 +2634,7 @@ function OutView({ out: rawOut, input = "", ctx = "", cwd, isLast = false, onSea
 
   if (out.kind === "ansi") {
     const rawHtml = rawOut.kind === "ansi" ? rawOut.html : out.html;
-    const lang = detectLangHtml(input, rawHtml);
+    const lang = detectLangHtml(input, rawHtml, rawOut.kind === "ansi" ? rawOut.lines : undefined);
     if (lang) {
       const raw = rawHtml.replace(/<[^>]+>/g, "");
       return <CodeView text={pm ? redact(raw) : raw} lang={lang} />;

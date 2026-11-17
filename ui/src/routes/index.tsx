@@ -114,8 +114,35 @@ function highlight(text: string, query: string): React.ReactNode {
 const INPUT_PROMPT_RE = /[?:>]\s*$|\[[yn]\/[yn]\]\s*$|\((yes\/no|[yn]\/[yn])[^)]*\)\s*$/i;
 // sudo ("[sudo] password for dev:"), ssh keys ("Enter passphrase for key …:"), PINs, tokens.
 const SECRET_PROMPT_RE = /(pass(word|phrase)|\bpin\b|secret|token|otp|verification code)[^\n]*[:>]\s*$/i;
+/**
+ * The last line of blockOutputText(b).trimEnd(). Runs on every render while a command
+ * streams, so for plain and ANSI output it looks back from the end instead of building
+ * (and splitting) the whole text — that churned through ~100 MB a frame on a big `cat`.
+ */
 function lastOutputLine(b: Block): string {
-  return blockOutputText(b).trimEnd().split("\n").pop() ?? "";
+  const o = b.out[b.out.length - 1];
+  const fromEnd = (n: number, line: (i: number) => string): string | null => {
+    for (let i = n - 1; i >= 0; i--) {
+      const t = line(i).trimEnd();
+      if (t) return t.slice(t.lastIndexOf("\n") + 1);
+    }
+    return null; // all blank: the answer is in an earlier output
+  };
+  let last: string | null = null;
+  if (o?.kind === "lines") last = fromEnd(o.lines.length, (i) => o.lines[i]!);
+  else if (o?.kind === "ansi" && o.lines) { const ls = o.lines; last = fromEnd(ls.length, (i) => ls[i]!.replace(/<[^>]+>/g, "")); }
+  else if (o?.kind === "ansi") last = htmlLastLine(o.html);
+  return last ?? (blockOutputText(b).trimEnd().split("\n").pop() ?? "");
+}
+
+/** Last line of the tag-stripped, end-trimmed html, reading only as much of its end as needed. */
+function htmlLastLine(html: string): string | null {
+  for (let w = 4096; ; w *= 4) {
+    // A window may start inside a tag; only text after a newline in it is used.
+    const text = html.slice(-w).replace(/<[^>]+>/g, "").trimEnd();
+    const nl = text.lastIndexOf("\n");
+    if (nl >= 0 || w >= html.length) return text ? text.slice(nl + 1) : null;
+  }
 }
 function isPromptingForInput(b: Block): boolean {
   return INPUT_PROMPT_RE.test(lastOutputLine(b));
