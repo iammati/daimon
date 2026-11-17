@@ -1,6 +1,7 @@
 import { shell } from "./rpc";
 import { perf, type AttachInfo, type ShellContext } from "./rpc";
-import { now, LIVE_WINDOW, type Out } from "./parse";
+import { now, LIVE_WINDOW, OutputStream, type Out } from "./parse";
+import { renderScreen } from "./screen";
 import { outputParser } from "./parseClient";
 export { OutputStream, parseOutput, capOutput, normalizeTerminal, LIVE_WINDOW, splitHtmlLines, looksLikeYaml } from "./parse";
 export type { Out, LsEntry, GitStatusFile, GitBranchNode, GitLogRef } from "./parse";
@@ -193,6 +194,15 @@ export function getTuiReplayBuffer(tabId: string): string[] {
 // redraws its screen anyway, and the daemon's own reattach replay is capped the same way.
 // Keeping every byte held a second copy of any big output for the whole command.
 const REPLAY_KEEP = 2 << 20;
+/** The output a cursor-moving command leaves on screen, parsed like any other output. */
+function screenOutput(input: string, raw: string): Out[] {
+  const text = renderScreen(raw);
+  const stream = new OutputStream(input);
+  stream.push(text);
+  return stream.final(text);
+}
+/** Most output (chars) a command may send and still be redrawn as a screen at its end (see run). */
+const RAW_KEEP = 1 << 20;
 const replaySize = new Map<string, number>();
 function startReplay(tabId: string) { replayBufMap.set(tabId, []); replaySize.set(tabId, 0); }
 function appendReplay(tabId: string, data: string) {
@@ -400,6 +410,11 @@ export async function run(
   const id = Math.random().toString(36).slice(2);
 
   let detectedTUI = false;
+  // The command's output as sent (up to RAW_KEEP chars), and whether it ever took over the
+  // screen: output that only moves the cursor about (fastfetch, progress bars) is shown in the
+  // inline terminal while it runs, then becomes the block's output as that screen ended up.
+  let rawRun: string | null = "";
+  let sawAltScreen = false;
   const isInteractive = INTERACTIVE_RE.test(input);
   const isStreamingInteractive = STREAMING_INTERACTIVE_RE.test(input);
   // If a streaming-interactive session (ssh/mosh) is active, commands sent here go to the
@@ -497,11 +512,12 @@ export async function run(
     globalOutputOff = shell.onOutput((tid, data) => {
       if (tid !== tabId) return;
       if (!commandWritten) return; // discard pre-command PTY noise
-      if (isAltScreen(tabId)) return;
+      if (isAltScreen(tabId)) { sawAltScreen = true; return; }
       // Buffer every byte for replay
       appendReplay(tabId, data);
       // Strip PTY mode-set sequences before buffering
       const cleanData = data.replace(PTY_STATE_RE, "");
+      if (rawRun !== null) rawRun = rawRun.length + cleanData.length > RAW_KEEP ? null : rawRun + cleanData;
       // Streaming interactive (ssh etc): always pipe output to block, no TUI takeover
       if (isStreamingInteractive) {
         appendOutput(cleanData);
@@ -604,10 +620,16 @@ export async function run(
       // the command is done the moment its output is, as in any terminal. A short output's
       // live view is the whole output: finish with the parser's final result directly.
       perf.finalAskAt = performance.now();
-      const liveNow = parser.latest(LIVE_WINDOW);
+      // Cursor-moving output that never went full screen: the block shows the screen it drew.
+      const screen = detectedTUI && !sawAltScreen && !isInteractive && !resumedAlt && rawRun !== null
+        ? screenOutput(effectiveInput, rawRun)
+        : null;
+      // `latest` before `final`: the worker answers in order, and `final` ends the command there.
+      const liveNow = screen ? null : parser.latest(LIVE_WINDOW);
       const complete = parser.final();
-      void liveNow.then(({ out: live, partial }) => (partial ? finish(live, complete) : complete.then((out) => finish(out))));
-      const finish = (out: Out[], later?: Promise<Out[]>) => {
+      if (screen) void complete.then(() => finish(screen, undefined, false));
+      else void liveNow!.then(({ out: live, partial }) => (partial ? finish(live, complete) : complete.then((out) => finish(out))));
+      const finish = (out: Out[], later?: Promise<Out[]>, fromParser = true) => {
         perf.finalGotAt = performance.now();
         const gb = finalCtx?.gitBranch ?? state.gitBranch;
         const nextState: State = {
@@ -636,7 +658,7 @@ export async function run(
         };
         perf.resolvedAt = performance.now();
         // The worker encodes its output for saving; only usable if the block shows exactly that.
-        const json = (o: Out[]) => (shown(o) === o ? { outputJson: parser.outputJson() } : {});
+        const json = (o: Out[]) => (fromParser && shown(o) === o ? { outputJson: parser.outputJson() } : {});
         if (!later) { resolve({ block: finalBlock, next: nextState, ...json(out) }); return; }
         resolve({ block: finalBlock, next: nextState, complete: later.then((o) => ({ out: shown(o), ...json(o) })) });
       };

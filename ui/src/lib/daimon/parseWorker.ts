@@ -77,7 +77,11 @@ onmessage = (e: MessageEvent<ToWorker>) => {
     return;
   }
   const run = runs.get(m.id);
-  if (!run) return;
+  if (!run) {
+    // Already finished: still answer, the page waits for a reply to every request.
+    if (m.t === "snap" || m.t === "final") reply(m.id, m.t, []);
+    return;
+  }
   const t = performance.now();
   if (m.t === "push") {
     run.buf += m.data; run.stream.push(m.data); schedulePrepare();
