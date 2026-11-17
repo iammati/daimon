@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
+import { appLog, appWarn } from "./appLog";
 
 export type BackdropKind = "none" | "blur" | "acrylic";
 
@@ -28,6 +29,8 @@ const GWL_EXSTYLE = -20;
 const WS_EX_LAYERED = 0x00080000n;
 const SWP_FRAMECHANGED_NOMOVE_NOSIZE_NOZORDER_NOACTIVATE = 0x0020 | 0x0002 | 0x0001 | 0x0004 | 0x0010;
 const DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+const DWMWA_SYSTEMBACKDROP_TYPE = 38;
+const DWMSBT_NONE = 1;
 const WCA_ACCENT_POLICY = 19;
 const ACCENT_DISABLED = 0;
 const ACCENT_ENABLE_BLURBEHIND = 3;
@@ -58,6 +61,7 @@ function load() {
   });
   const dwmapi = dlopen("dwmapi.dll", {
     DwmSetWindowAttribute: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+    DwmGetWindowAttribute: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
     DwmEnableBlurBehindWindow: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
   });
   const gdi32 = dlopen("gdi32.dll", {
@@ -77,12 +81,13 @@ export function prepareWindow(hwnd: Pointer | null): boolean {
   try {
     libs ??= load();
     const { user32, dwmapi, gdi32 } = libs;
-    if (!user32.IsWindow(hwnd)) return false;
+    if (!user32.IsWindow(hwnd)) { appWarn("[backdrop] setup: not a window handle"); return false; }
 
     // Electrobun marks transparent windows WS_EX_LAYERED (meant for CEF off-screen
     // rendering). With WebView2 nothing ever calls UpdateLayeredWindow, and layered
     // windows don't get DWM backdrops — drop the style, keep the transparent webview.
     const ex = BigInt(user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE));
+    appLog(`[backdrop] setup: exstyle 0x${ex.toString(16)}${ex & WS_EX_LAYERED ? " (layered, dropping it)" : ""}`);
     if (ex & WS_EX_LAYERED) user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
 
     // The window class has no background brush, so the area under the (transparent)
@@ -99,8 +104,20 @@ export function prepareWindow(hwnd: Pointer | null): boolean {
     bbView.setUint32(0, DWM_BB_ENABLE | DWM_BB_BLURREGION, true);
     bbView.setInt32(4, 1, true);
     bbView.setBigUint64(8, BigInt(rgn ?? 0), true);
-    dwmapi.DwmEnableBlurBehindWindow(hwnd, ptr(bb));
+    const bbHr = dwmapi.DwmEnableBlurBehindWindow(hwnd, ptr(bb));
+    appLog("[backdrop] setup: DwmEnableBlurBehindWindow →", hr(bbHr));
     if (rgn) gdi32.DeleteObject(rgn);
+
+    // No system backdrop (Mica): Electrobun's window comes with Mica on, and Mica sits
+    // behind everything — it only shows the (blurred) wallpaper, and the blur helper's
+    // layer would sample Mica instead of the windows behind ours. The result is an
+    // opaque-looking window whatever the page's opacity and blur.
+    const sbt = new Int32Array([0]);
+    dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ptr(sbt), 4);
+    const was = sbt[0];
+    sbt[0] = DWMSBT_NONE;
+    const sbtHr = dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ptr(sbt), 4);
+    appLog(`[backdrop] setup: system backdrop ${was} → none (${hr(sbtHr)})`);
 
     const dark = new Int32Array([1]);
     dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ptr(dark), 4);
@@ -108,7 +125,7 @@ export function prepareWindow(hwnd: Pointer | null): boolean {
     user32.SetWindowPos(hwnd, null, 0, 0, 0, 0, SWP_FRAMECHANGED_NOMOVE_NOSIZE_NOZORDER_NOACTIVATE);
     return true;
   } catch (err) {
-    console.warn("[backdrop] setup failed:", err);
+    appWarn("[backdrop] setup failed:", err);
     return false;
   }
 }
@@ -129,9 +146,11 @@ export function setBackdrop(hwnd: Pointer | null, kind: BackdropKind): boolean {
     view.setInt32(0, WCA_ACCENT_POLICY, true);
     view.setBigUint64(8, BigInt(ptr(accent)), true);
     view.setBigUint64(16, 16n, true);
-    return libs.user32.SetWindowCompositionAttribute(hwnd, ptr(data)) !== 0;
+    const ok = libs.user32.SetWindowCompositionAttribute(hwnd, ptr(data)) !== 0;
+    appLog("[backdrop] DWM accent", kind, ok ? "applied" : "FAILED");
+    return ok;
   } catch (err) {
-    console.warn("[backdrop] apply failed:", err);
+    appWarn("[backdrop] apply failed:", err);
     return false;
   }
 }
@@ -155,15 +174,16 @@ export function loadVariableBlur(): boolean {
   if (process.platform !== "win32") return false;
   if (blurLib) return true;
   const path = blurLibPath();
-  if (!path) return false;
+  if (!path) { appLog("[backdrop] helper DLL not found next to", process.execPath, "— using DWM steps"); return false; }
   try {
     blurLib = dlopen(path, {
       daimon_backdrop_attach: { args: [FFIType.ptr], returns: FFIType.i32 },
       daimon_backdrop_set_blur: { args: [FFIType.ptr, FFIType.f32, FFIType.f32], returns: FFIType.i32 },
     }).symbols as unknown as BlurLib;
+    appLog("[backdrop] helper DLL loaded:", path);
     return true;
   } catch (err) {
-    console.warn("[backdrop] couldn't load", path, err);
+    appWarn("[backdrop] couldn't load", path, err);
     return false;
   }
 }
@@ -174,7 +194,8 @@ const hr = (code: number) => "0x" + (code >>> 0).toString(16).padStart(8, "0");
 export function attachVariableBlur(hwnd: Pointer | null): boolean {
   if (!hwnd || !blurLib) return false;
   const code = blurLib.daimon_backdrop_attach(hwnd);
-  if (code !== 0) console.warn("[backdrop] attach failed:", hr(code));
+  if (code !== 0) appWarn("[backdrop] attach failed:", hr(code));
+  else appLog("[backdrop] helper attached");
   return code === 0;
 }
 
@@ -189,6 +210,7 @@ export function setVariableBlur(hwnd: Pointer | null, blur: number): boolean {
   if (!hwnd || !blurLib) return false;
   const v = Math.min(BLUR_MAX, Math.max(0, blur));
   const code = blurLib.daimon_backdrop_set_blur(hwnd, v > 0 ? 1 : 0, v);
-  if (code !== 0) console.warn("[backdrop] set blur failed:", hr(code));
+  if (code !== 0) appWarn("[backdrop] set blur failed:", hr(code));
+  else appLog("[backdrop] blur set:", v, "px");
   return code === 0;
 }

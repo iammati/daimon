@@ -1,6 +1,7 @@
 import { BrowserWindow, ApplicationMenu } from "electrobun/bun";
 import { openExternal } from "electrobun/bun/utils";
 import { connectDaemon } from "./daemon";
+import { appLog, appWarn } from "./appLog";
 import {
   attachVariableBlur, backdropForBlur, loadVariableBlur, prepareWindow, setBackdrop, setVariableBlur,
   type BackdropKind,
@@ -196,6 +197,7 @@ if (isWindows) {
 
 // Windows: blur the desktop behind the window. The UI reports the blur slider
 // as { type: "glass", blur }.
+appLog("[main] windows:", isWindows, "transparent:", nativeTransparent, "variable blur helper:", !!variableBlur, "forced backdrop:", process.env.DAIMON_BACKDROP ?? "-");
 if (isWindows && nativeTransparent) {
   const hwnd = win.ptr;
   if (prepareWindow(hwnd)) {
@@ -209,14 +211,14 @@ if (isWindows && nativeTransparent) {
       apply = (blurPx) => {
         if (blurPx !== current && setVariableBlur(hwnd, blurPx)) current = blurPx;
       };
-      console.log("[main] desktop blur: variable radius");
+      appLog("[main] desktop blur: variable radius");
     } else {
       let current: BackdropKind | null = null;
       apply = (blurPx) => {
         const kind = forced ?? backdropForBlur(blurPx);
         if (kind === current) return;
-        if (setBackdrop(hwnd, kind)) { current = kind; console.log("[main] desktop backdrop →", kind); }
-        else console.warn("[main] backdrop", kind, "was not applied");
+        if (setBackdrop(hwnd, kind)) { current = kind; appLog("[main] desktop backdrop →", kind); }
+        else appWarn("[main] backdrop", kind, "was not applied");
       };
     }
 
@@ -227,7 +229,7 @@ if (isWindows && nativeTransparent) {
       if (!Number.isFinite(pinned) && msg.type === "glass" && typeof msg.blur === "number") apply(msg.blur);
     });
   } else {
-    console.warn("[main] couldn't get a usable window handle — desktop blur disabled");
+    appWarn("[main] couldn't get a usable window handle — desktop blur disabled");
   }
 }
 
