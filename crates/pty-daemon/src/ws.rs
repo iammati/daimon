@@ -19,6 +19,9 @@ use tracing::{error, info, warn};
 /// How long the event bus waits on one client before giving up on it.
 const STALL_LIMIT: Duration = Duration::from_secs(10);
 
+/// Largest output message built from queued chunks (see the per-client send task).
+const MERGE_LIMIT: usize = 64 << 10;
+
 /// A connected WebSocket client: its event queue, and a signal that closes its connection.
 #[derive(Clone)]
 struct Client {
@@ -97,9 +100,23 @@ pub async fn serve(listener: TcpListener, db: Store, token: String, port: u16) -
             let (mut sink, mut source) = ws.split();
 
             let send_task = tokio::spawn(async move {
-                while let Some(ev) = client_rx.recv().await {
+                // Output that queued up while the client was busy goes out as one message
+                // (consecutive chunks of one tab, up to MERGE_LIMIT): fewer messages to parse
+                // exactly when the client is behind; nothing waits for more to arrive.
+                let mut next = client_rx.recv().await;
+                while let Some(mut ev) = next.take() {
+                    if let SessionEvent::Output { tab_id, data } = &mut ev {
+                        while data.len() < MERGE_LIMIT {
+                            match client_rx.try_recv() {
+                                Ok(SessionEvent::Output { tab_id: t, data: more }) if t == *tab_id => data.push_str(&more),
+                                Ok(other) => { next = Some(other); break; }
+                                Err(_) => break,
+                            }
+                        }
+                    }
                     let json = serde_json::to_string(&ev).unwrap();
                     if sink.send(Message::Text(json.into())).await.is_err() { break; }
+                    if next.is_none() { next = client_rx.recv().await; }
                 }
             });
 
