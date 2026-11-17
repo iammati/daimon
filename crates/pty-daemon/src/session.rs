@@ -27,6 +27,8 @@ pub enum SessionEvent {
     AltScreenExit { tab_id: String },
     /// Response to a request command (git status, git log, etc).
     Response { req_id: String, ok: bool, data: serde_json::Value },
+    /// A file in ~/.config/daimon/plugins/ was added, changed or removed.
+    PluginsChanged,
 }
 
 /// Messages sent frontend → WebSocket → session.
@@ -102,7 +104,19 @@ pub enum SessionCommand {
     TailscaleDown { req_id: String },
     /// Run `tailscale login --force-reauth` and return the auth URL.
     TailscaleLoginUrl { req_id: String },
+    /// Source of every runtime UI plugin in ~/.config/daimon/plugins/.
+    PluginList { req_id: String },
+    /// Run a program (no shell) for a plugin and return its exit code and output.
+    Exec {
+        req_id: String,
+        cmd: String,
+        #[serde(default)] args: Vec<String>,
+        #[serde(default)] cwd: Option<String>,
+        #[serde(default = "default_exec_timeout")] timeout_ms: u64,
+    },
 }
+
+fn default_exec_timeout() -> u64 { 10_000 }
 
 /// Pick the shell to run. Daimon's OSC 133 integration is loaded via ZDOTDIR,
 /// which only zsh honours — so prefer zsh even when $SHELL is something else

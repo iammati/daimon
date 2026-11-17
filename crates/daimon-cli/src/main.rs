@@ -13,10 +13,10 @@ fn main() -> anyhow::Result<()> {
         Some("shell-profiling") => shell_profiling::run(),
         Some("plugin") => {
             match args.next().as_deref() {
-                Some("build") => plugin::run_build(),
-                Some("init")  => plugin::run_init(),
+                Some("init") => plugin::run_init(),
+                Some("list") => plugin::run_list(),
                 _ => {
-                    eprintln!("usage: daimon plugin <init|build>");
+                    eprintln!("usage: daimon plugin <init|list>");
                     std::process::exit(1)
                 }
             }

@@ -52,7 +52,8 @@ JSON text frames, tagged by `type`.
   - completion: `complete`, `listPaths`
   - store: `historyAdd/List/Search`, `blockSave/List/Recent/Search/Clear`, `prefGet/Set`
   - daemon: `daemonInfo`, `shutdown`
-- **daemon → UI:** `output`, `prompt`, `commandStart`, `altScreenEnter`, `altScreenExit`, `exit`, `response`.
+  - plugins: `pluginList` (source of `~/.config/daimon/plugins/*.{js,mjs,jsx,ts,tsx}`), `exec` (run a program, no shell, with a timeout)
+- **daemon → UI:** `output`, `prompt`, `commandStart`, `altScreenEnter`, `altScreenExit`, `exit`, `response`, `pluginsChanged` (the plugins folder is polled every 500 ms).
 
 A session is created on the first `write` to an unknown tab id.
 

@@ -3,16 +3,30 @@ import { Shield, ShieldOff, ShieldAlert, Loader2 } from "lucide-react";
 import openstackIcon from "@/assets/openstack-icon.svg";
 import { shell } from "@/lib/daimon/rpc";
 import { Keys } from "@/components/daimon/Kbd";
-import { useHeaderButtons } from "@/lib/daimon/plugins";
+import { useHeaderButtons, reportPluginError } from "@/lib/daimon/plugins";
 
 export function HeaderExtensionSlot({ extensions }: { extensions: React.ReactNode[] }) {
   return <>{extensions.map((e, i) => <React.Fragment key={i}>{e}</React.Fragment>)}</>;
 }
 
+/** Keeps a crashing plugin button from taking the header down with it. */
+class PluginBoundary extends React.Component<{ id: string; children: React.ReactNode }, { failed: boolean }> {
+  override state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  override componentDidCatch(err: unknown) { reportPluginError(this.props.id, err); }
+  override render() { return this.state.failed ? null : this.props.children; }
+}
+
 /** Renders all plugin-registered header buttons. Drop this into the header right-side area. */
 export function HeaderButtonSlot() {
   const buttons = useHeaderButtons();
-  return <>{buttons.map((b, i) => <React.Fragment key={i}>{b}</React.Fragment>)}</>;
+  return (
+    <>
+      {buttons.map(({ id, render: R }) => (
+        <PluginBoundary key={id} id={id}>{typeof R === "function" ? <R /> : R}</PluginBoundary>
+      ))}
+    </>
+  );
 }
 
 export function OpenStackBadge({ region, project, domain }: { region: string | null; project: string | null; domain?: string | null }) {

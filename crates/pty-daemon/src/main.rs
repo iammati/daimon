@@ -3,6 +3,7 @@ mod complete;
 mod daemon_info;
 mod kitty_graphics;
 mod link_preview;
+mod plugins;
 mod session;
 mod store;
 mod ws;

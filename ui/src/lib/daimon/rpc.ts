@@ -63,7 +63,8 @@ type DaemonEvent =
   | { type: "commandStart"; tab_id: string }
   | { type: "altScreenEnter"; tab_id: string }
   | { type: "altScreenExit"; tab_id: string }
-  | { type: "response"; req_id: string; ok: boolean; data: unknown };
+  | { type: "response"; req_id: string; ok: boolean; data: unknown }
+  | { type: "pluginsChanged" };
 
 type OutputListener        = (tabId: string, data: string) => void;
 type ExitListener          = (tabId: string, code: number) => void;
@@ -166,12 +167,17 @@ async function connect() {
       altScreenListeners.forEach((fn) => fn(ev.tab_id, true));
     } else if (ev.type === "altScreenExit") {
       altScreenListeners.forEach((fn) => fn(ev.tab_id, false));
+    } else if (ev.type === "pluginsChanged") {
+      pluginsChangedListeners.forEach((fn) => fn());
     } else if (ev.type === "response") {
       const p = pendingRequests.get(ev.req_id);
       if (p) {
         pendingRequests.delete(ev.req_id);
         if (ev.ok) p.resolve(ev.data);
-        else p.reject(new Error(String(ev.data)));
+        else {
+          const d = ev.data as { error?: unknown } | null;
+          p.reject(new Error(typeof d?.error === "string" ? d.error : String(ev.data)));
+        }
       }
     }
   };
@@ -205,6 +211,7 @@ export type AttachInfo = {
 
 type AltScreenListener = (tabId: string, enter: boolean) => void;
 const altScreenListeners = new Set<AltScreenListener>();
+const pluginsChangedListeners = new Set<() => void>();
 
 export function openInBrowser(url: string) {
   (window as { __electrobunSendToHost?: (m: unknown) => void }).__electrobunSendToHost?.({ type: "openUrl", url });
@@ -216,6 +223,8 @@ export const shell = {
   onContext:      (fn: ContextListener)      => { contextListeners.add(fn);       return () => contextListeners.delete(fn); },
   onCommandStart: (fn: CommandStartListener) => { commandStartListeners.add(fn);  return () => commandStartListeners.delete(fn); },
   onAltScreen:    (fn: AltScreenListener)    => { altScreenListeners.add(fn);     return () => altScreenListeners.delete(fn); },
+  /** A file in ~/.config/daimon/plugins/ changed (the daemon watches the folder). */
+  onPluginsChanged: (fn: () => void)         => { pluginsChangedListeners.add(fn); return () => pluginsChangedListeners.delete(fn); },
 
   write:  (tabId: string, data: string) => { send({ type: "write", tab_id: tabId, data }); return Promise.resolve(); },
   /** Make a resumed full-screen program repaint (resize dance → SIGWINCH). */
@@ -291,6 +300,14 @@ export const shell = {
   tailscaleUp:         () => request<{ ok: boolean; error?: string }>({ type: "tailscaleUp" }),
   tailscaleDown:       () => request<{ ok: boolean; error?: string }>({ type: "tailscaleDown" }),
   tailscaleLoginUrl:   () => request<{ ok: boolean; error?: string }>({ type: "tailscaleLoginUrl" }),
+  /** `plugins`: plugin protocol version; missing on daemons that predate plugins. */
+  daemonInfo:          () => request<{ build: string; sessions: number; pid: number; plugins?: number }>({ type: "daemonInfo" }, 15000),
+  pluginList:          () => request<{ name: string; file: string; source: string }[]>({ type: "pluginList" }, 15000),
+  exec:                (cmd: string, args: string[] = [], opts: { cwd?: string; timeoutMs?: number } = {}) => {
+    const timeoutMs = opts.timeoutMs ?? 10000;
+    return request<{ code: number | null; stdout: string; stderr: string }>(
+      { type: "exec", cmd, args, cwd: opts.cwd, timeout_ms: timeoutMs }, timeoutMs + 2000);
+  },
   describeResource:    (..._args: unknown[]) => Promise.resolve(""),
   getNodeEvents:       (..._args: unknown[]) => Promise.resolve([] as { type: string; reason: string; age: string; message: string }[]),
 };

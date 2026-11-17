@@ -2,7 +2,6 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
-import fs from "fs";
 import { wraith } from "wraithterm/vite";
 import type { Plugin } from "vite";
 
@@ -36,12 +35,6 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
-      // User plugin file — edit ~/.config/daimon/plugins.tsx to extend daimon.
-      // Falls back to the no-op stub in src/ when the user file doesn't exist.
-      "@daimon-plugins": (() => {
-        const userPlugins = path.join(process.env.HOME ?? "", ".config/daimon/plugins.tsx");
-        return fs.existsSync(userPlugins) ? userPlugins : path.resolve(__dirname, "./src/plugins.tsx");
-      })(),
     },
   },
   build: {
@@ -60,6 +53,9 @@ export default defineConfig({
             { name: "markdown", test: /node_modules[\\/](marked|dompurify)[\\/]/ },
             { name: "wraith", test: /node_modules[\\/]wraithterm[\\/]/ },
             { name: "ui-vendor", test: /node_modules[\\/](@radix-ui|@floating-ui|@tanstack|cmdk|lucide-react|sonner|vaul)[\\/]/ },
+            // Plugin runtime: loaded only when a plugin needs it (see lib/daimon/plugins.ts).
+            { name: "plugin-tailwind", test: /node_modules[\\/]tailwindcss[\\/]/ },
+            { name: "plugin-sucrase", test: /node_modules[\\/](sucrase|lines-and-columns|ts-interface-checker)[\\/]/ },
             { name: "vendor", test: /node_modules[\\/]/ },
           ],
         },

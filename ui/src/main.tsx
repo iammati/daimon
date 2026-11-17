@@ -3,8 +3,9 @@ import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { getRouter } from "./router";
 import "./styles.css";
-import "@daimon-plugins";
 import { applyGlass, loadGlass } from "./lib/daimon/appearance";
+import { installMagnify } from "./lib/daimon/magnify";
+import { loadPlugins } from "./lib/daimon/plugins";
 
 // The native shell appends ?transparent=1 only when the window really is see-through
 // (and &blur=native when the compositor also blurs the desktop behind it).
@@ -51,6 +52,10 @@ import { applyGlass, loadGlass } from "./lib/daimon/appearance";
 
 applyGlass(loadGlass());
 
+// Ctrl + wheel magnifies the window on Windows/Linux, like pinch-zoom on macOS (which the
+// native shell turns on in WKWebView itself).
+if (!/Mac/.test(navigator.platform)) installMagnify(document.getElementById("root")!);
+
 const router = getRouter();
 
 createRoot(document.getElementById("root")!).render(
@@ -58,3 +63,5 @@ createRoot(document.getElementById("root")!).render(
     <RouterProvider router={router} />
   </StrictMode>
 );
+
+void loadPlugins();
