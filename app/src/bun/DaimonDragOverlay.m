@@ -1,9 +1,11 @@
 #import <Cocoa/Cocoa.h>
 
 // Transparent NSView subclass covering the title bar zone.
-// mouseDown: calls performWindowDragWithEvent: synchronously — true native drag.
+// mouseDragged: starts the native drag so mouseDown: is free to detect double-clicks.
 // hitTest: passes through the traffic-lights zone (x < 80).
-@interface DaimonDragOverlay : NSView
+@interface DaimonDragOverlay : NSView {
+    NSEvent *_pendingMouseDown;
+}
 @end
 
 @implementation DaimonDragOverlay
@@ -19,11 +21,26 @@
 }
 
 - (void)mouseDown:(NSEvent *)event {
+    NSLog(@"[DaimonDrag] mouseDown clickCount=%ld", (long)event.clickCount);
     if (event.clickCount == 2) {
+        _pendingMouseDown = nil;
+        NSLog(@"[DaimonDrag] calling zoom:");
         [self.window zoom:self];
     } else {
-        [self.window performWindowDragWithEvent:event];
+        _pendingMouseDown = event;
     }
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (_pendingMouseDown) {
+        NSEvent *down = _pendingMouseDown;
+        _pendingMouseDown = nil;
+        [self.window performWindowDragWithEvent:down];
+    }
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    _pendingMouseDown = nil;
 }
 
 @end

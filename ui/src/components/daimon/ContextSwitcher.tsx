@@ -91,7 +91,7 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
   }, [cursor]);
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "j") {
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === "j") {
       e.preventDefault();
       e.stopPropagation();
       setOpenTracked(false);
@@ -116,12 +116,12 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
 
   return (
     <div className="relative" ref={box}>
-      <div className="flex items-stretch gap-1.5">
+      <div className="flex items-stretch">
         <button
           onClick={() => setOpenTracked(!open)}
           title="Kubernetes context"
           aria-expanded={open}
-          className={`flex items-center gap-2 border bg-card/70 veil-surface py-1.5 pl-2.5 pr-3 glass transition-colors hover:border-signal/50 ${open ? "border-signal/60" : "border-border"}`}
+          className={`flex items-center gap-2 border-y border-l bg-card/70 veil-surface py-1.5 pl-2.5 pr-3 glass transition-colors hover:border-signal/50 ${open ? "border-signal/60" : "border-border"}`}
         >
           <img src={kubernetesIcon} alt="" className="size-3.5 shrink-0" />
           <span className={`font-mono text-[12px] ${ctxName ? "text-foreground" : "text-muted-foreground"}`}>{ctxName || "no context"}</span>
@@ -130,7 +130,7 @@ export function ContextSwitcher({ ctxName, onPick, forceOpen, forceClose, onOpen
           onClick={() => setOpenTracked(!open)}
           title="Switch context (⌘J)"
           tabIndex={-1}
-          className="flex items-center border border-border bg-card/70 veil-surface px-1.5 glass transition-colors hover:border-signal/50"
+          className={`flex items-center border bg-card/70 veil-surface px-1.5 glass transition-colors hover:border-signal/50 ${open ? "border-signal/60" : "border-border"}`}
         >
           <Keys combo="⌘J" size="xs" />
         </button>

@@ -206,6 +206,10 @@ export type AttachInfo = {
 type AltScreenListener = (tabId: string, enter: boolean) => void;
 const altScreenListeners = new Set<AltScreenListener>();
 
+export function openInBrowser(url: string) {
+  (window as { __electrobunSendToHost?: (m: unknown) => void }).__electrobunSendToHost?.({ type: "openUrl", url });
+}
+
 export const shell = {
   onOutput:       (fn: OutputListener)       => { outputListeners.add(fn);        return () => outputListeners.delete(fn); },
   onExit:         (fn: ExitListener)         => { exitListeners.add(fn);          return () => exitListeners.delete(fn); },
@@ -283,6 +287,10 @@ export const shell = {
   blockClear:          (session_id: string) => request<boolean>({ type: "blockClear", session_id }),
   prefSet:             (key: string, value: string) => request<boolean>({ type: "prefSet", key, value }),
   prefGet:             (key: string) => request<string | null>({ type: "prefGet", key }),
+  tailscaleStatus:     () => request<{ state: string; authURL: string; ip: string; hostname: string; loginIssue: boolean }>({ type: "tailscaleStatus" }),
+  tailscaleUp:         () => request<{ ok: boolean; error?: string }>({ type: "tailscaleUp" }),
+  tailscaleDown:       () => request<{ ok: boolean; error?: string }>({ type: "tailscaleDown" }),
+  tailscaleLoginUrl:   () => request<{ ok: boolean; error?: string }>({ type: "tailscaleLoginUrl" }),
   describeResource:    (..._args: unknown[]) => Promise.resolve(""),
   getNodeEvents:       (..._args: unknown[]) => Promise.resolve([] as { type: string; reason: string; age: string; message: string }[]),
 };

@@ -94,6 +94,14 @@ pub enum SessionCommand {
     PrefSet { req_id: String, key: String, value: String },
     /// Get a preference value.
     PrefGet { req_id: String, key: String },
+    /// Run `tailscale status --json`.
+    TailscaleStatus { req_id: String },
+    /// Run `tailscale up` (connect / re-auth).
+    TailscaleUp { req_id: String },
+    /// Run `tailscale down` (disconnect).
+    TailscaleDown { req_id: String },
+    /// Run `tailscale login --force-reauth` and return the auth URL.
+    TailscaleLoginUrl { req_id: String },
 }
 
 /// Pick the shell to run. Daimon's OSC 133 integration is loaded via ZDOTDIR,

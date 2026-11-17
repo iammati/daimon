@@ -15,7 +15,7 @@ import kubernetesIcon from "@/assets/kubernetes-icon.svg";
 import { LandingPage } from "@/components/daimon/LandingPage";
 import { CommandPalette } from "@/components/daimon/CommandPalette";
 import { GlobalSearch } from "@/components/daimon/GlobalSearch";
-import { HeaderExtensionSlot, OpenStackBadge } from "@/components/daimon/HeaderExtension";
+import { HeaderExtensionSlot, OpenStackBadge, HeaderButtonSlot } from "@/components/daimon/HeaderExtension";
 import { KeyboardShortcutsModal } from "@/components/daimon/KeyboardShortcutsModal";
 import { SettingsModal } from "@/components/daimon/SettingsModal";
 import { PowerlineStatus } from "@/components/daimon/PowerlineStatus";
@@ -798,9 +798,14 @@ function Daimon() {
         }
         return;
       }
-      if (e.key === "t") {
+      if (!e.shiftKey && e.key === "t") {
         e.preventDefault();
         newTab();
+        return;
+      }
+      if (e.shiftKey && e.key === "T") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("toggle-tailscale"));
         return;
       }
       if (e.key === "d" || e.key === "D") {
@@ -1578,7 +1583,10 @@ function Daimon() {
             >
               {presentationMode ? <EyeOffIcon className="size-4" /> : <EyeIcon className="size-4" />}
             </button>
-            <ContextSwitcher ctxName={active.state.ctx.name} onPick={pickCtx} forceOpen={ctxSwitcherOpen} forceClose={ctxSwitcherClose} onOpenChange={(o) => { ctxSwitcherIsOpen.current = o; if (!o) refocusComposer(); }} />
+            <div className="flex items-stretch gap-1.5">
+              <HeaderButtonSlot />
+              <ContextSwitcher ctxName={active.state.ctx.name} onPick={pickCtx} forceOpen={ctxSwitcherOpen} forceClose={ctxSwitcherClose} onOpenChange={(o) => { ctxSwitcherIsOpen.current = o; if (!o) refocusComposer(); }} />
+            </div>
           </div>
         </header>
 

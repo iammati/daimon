@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { RouterProvider } from "@tanstack/react-router";
 import { getRouter } from "./router";
 import "./styles.css";
+import "@daimon-plugins";
 import { applyGlass, loadGlass } from "./lib/daimon/appearance";
 
 // The native shell appends ?transparent=1 only when the window really is see-through

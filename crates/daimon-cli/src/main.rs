@@ -1,5 +1,6 @@
 mod precmd;
 mod preexec;
+mod plugin;
 mod setup;
 mod shell_profiling;
 
@@ -10,13 +11,23 @@ fn main() -> anyhow::Result<()> {
         Some("preexec")         => preexec::run(),
         Some("setup")           => setup::run(),
         Some("shell-profiling") => shell_profiling::run(),
+        Some("plugin") => {
+            match args.next().as_deref() {
+                Some("build") => plugin::run_build(),
+                Some("init")  => plugin::run_init(),
+                _ => {
+                    eprintln!("usage: daimon plugin <init|build>");
+                    std::process::exit(1)
+                }
+            }
+        }
         Some(cmd) => {
             eprintln!("daimon: unknown command '{cmd}'");
-            eprintln!("usage: daimon <precmd|preexec|setup|shell-profiling>");
+            eprintln!("usage: daimon <precmd|preexec|setup|shell-profiling|plugin>");
             std::process::exit(1)
         }
         None => {
-            eprintln!("usage: daimon <precmd|preexec|setup|shell-profiling>");
+            eprintln!("usage: daimon <precmd|preexec|setup|shell-profiling|plugin>");
             std::process::exit(1)
         }
     }
