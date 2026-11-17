@@ -13,6 +13,13 @@ pub fn run() -> anyhow::Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    // u8s runs while git does (each is a process start; this hook runs before every prompt).
+    let u8s = find_in_path("u8s").and_then(|bin| std::process::Command::new(bin)
+        .arg("env")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok());
     let git = git_info(&pwd);
 
     let mut obj = serde_json::Map::new();
@@ -39,7 +46,7 @@ pub fn run() -> anyhow::Result<()> {
     //      NOT in kubeconfig's current-context; `u8s env` is its stable machine-readable hook.
     //   2. KUBECTL_CONTEXT / KUBECTL_NAMESPACE env (set at session init for plain kubectl users).
     //   3. kubeconfig current-context (plain kubectl, no env).
-    let (u8s_ctx, u8s_ns) = u8s_context();
+    let (u8s_ctx, u8s_ns) = u8s_context(u8s);
     match u8s_ctx.or_else(|| std::env::var("KUBECTL_CONTEXT").ok()).or_else(kube_current_context) {
         Some(ctx) if !ctx.is_empty() => { obj.insert("k8sContext".into(), ctx.into()); }
         _ => {}
@@ -67,9 +74,24 @@ pub struct GitInfo {
 /// Queries the SAPCC `u8s` tool for its current session context/namespace via `u8s env`
 /// (clean `KEY=value` lines, no ANSI). Returns (None, None) if u8s is absent or errors —
 /// non-u8s users are unaffected. One subprocess per precmd; u8s is built as a prompt hook.
-fn u8s_context() -> (Option<String>, Option<String>) {
-    let out = match std::process::Command::new("u8s").arg("env").output() {
-        Ok(o) if o.status.success() => o.stdout,
+/// `name`'s path in PATH, like the shell would find it. On WSL the Windows directories
+/// (/mnt/<drive>/…) are skipped: looking a program up there takes ~1 ms per directory, so
+/// missing tools (u8s) cost ~13 ms on every prompt, and Linux won't run what's there by
+/// that name anyway.
+fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .filter(|d| !(wsl && d.starts_with("/mnt/")))
+            .map(|d| d.join(name))
+            .find(|p| p.metadata().is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    })
+}
+
+fn u8s_context(child: Option<std::process::Child>) -> (Option<String>, Option<String>) {
+    let out = match child.map(|c| c.wait_with_output()) {
+        Some(Ok(o)) if o.status.success() => o.stdout,
         _ => return (None, None),
     };
     let text = String::from_utf8_lossy(&out);
@@ -111,9 +133,30 @@ pub fn git_info_pub(path: &str) -> Option<GitInfo> { git_info(path) }
 ///
 /// One `git status --porcelain=v2 --branch` gives branch + ahead/behind + tracked dirty in a single
 /// process; `--no-optional-locks` avoids touching the index lock from a background prompt.
-fn git_info(path: &str) -> Option<GitInfo> {
-    use std::process::Command;
+/// Whether `path` may be inside a git repository: a `.git` (directory, or file for worktrees
+/// and submodules) in it or above. Starting git just to learn "not a repository" costs a
+/// process start on every prompt; GIT_DIR can point anywhere, so then git is asked.
+fn maybe_repo(path: &str) -> bool {
+    if std::env::var_os("GIT_DIR").is_some() { return true; }
+    let mut dir = Some(std::path::Path::new(path));
+    while let Some(d) = dir {
+        if d.join(".git").exists() { return true; }
+        dir = d.parent();
+    }
+    false
+}
 
+fn git_info(path: &str) -> Option<GitInfo> {
+    use std::process::{Command, Stdio};
+
+    if !maybe_repo(path) { return None; }
+    // The line counts run alongside status; they're only used if status finds changes.
+    let numstat = Command::new("git")
+        .args(["-C", path, "--no-optional-locks", "diff", "--numstat", "HEAD"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok();
     let status = Command::new("git")
         .args(["-C", path, "--no-optional-locks", "status", "--porcelain=v2", "--branch", "--untracked-files=no"])
         .output()
@@ -148,19 +191,18 @@ fn git_info(path: &str) -> Option<GitInfo> {
         }
     }
 
-    let (added, removed) = diff_line_counts(path);
+    // No tracked changes (status lists them all, staged or not): nothing to count.
+    let numstat = numstat.and_then(|c| c.wait_with_output().ok());
+    let (added, removed) = if dirty { diff_line_counts(numstat) } else { (0, 0) };
     Some(GitInfo { branch, dirty, ahead, behind, added, removed })
 }
 
 /// Insertions/deletions of TRACKED changes (worktree + index) vs HEAD, via `git diff --numstat`.
 /// Untracked files are excluded (new files aren't "diff lines", and skipping them keeps the walk
 /// cheap). Binary files report "-\t-\t<path>" in numstat and are ignored.
-fn diff_line_counts(path: &str) -> (usize, usize) {
-    let out = match std::process::Command::new("git")
-        .args(["-C", path, "--no-optional-locks", "diff", "--numstat", "HEAD"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o.stdout,
+fn diff_line_counts(out: Option<std::process::Output>) -> (usize, usize) {
+    let out = match out {
+        Some(o) if o.status.success() => o.stdout,
         _ => return (0, 0),
     };
     let text = String::from_utf8_lossy(&out);
