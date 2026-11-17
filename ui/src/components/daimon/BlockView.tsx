@@ -2723,10 +2723,16 @@ const COLLAPSED_MAX_PX = 320;
 const TUI_BG = "#0d1117";
 
 /** Plain text of the outputs that can carry URLs (raw lines and ANSI html, tags and entities dropped). */
-function outputText(out: Out[]): string {
+const PREVIEW_SCAN_CHARS = 256 << 10;
+
+/** Plain text of the outputs that can carry URLs, or (with `limit`) about its first `limit` chars. */
+function outputText(out: Out[], limit = Infinity): string {
+  const decode = (h: string) => h.replace(/<[^>]+>/g, "").replace(/&(amp|lt|gt|quot|#39);/g, (_, e: string) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[e]!);
+  // Whole lines up to the limit (the html's own line pieces when the parser has them).
+  const head = (ls: string[]) => { const kept: string[] = []; let n = 0; for (const l of ls) { if (n > limit) break; kept.push(l); n += l.length + 1; } return kept; };
   return out.map((o) =>
-    o.kind === "lines" ? o.lines.join("\n")
-    : o.kind === "ansi" ? o.html.replace(/<[^>]+>/g, "").replace(/&(amp|lt|gt|quot|#39);/g, (_, e: string) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[e]!)
+    o.kind === "lines" ? (limit === Infinity ? o.lines : head(o.lines)).join("\n")
+    : o.kind === "ansi" ? decode(limit === Infinity ? o.html : o.lines ? head(o.lines).join("\n") : o.html.slice(0, limit))
     : "",
   ).join("\n");
 }
@@ -2735,7 +2741,14 @@ function outputText(out: Out[]): string {
 function LinkPreviews({ out }: { out: Out[] }) {
   const pm = useContext(PresentationModeContext);
   const enabled = useLinkPreviewsEnabled();
-  const urls = useMemo(() => (enabled && !pm ? previewUrls(outputText(out)) : []), [out, enabled, pm]);
+  // Found after the block is painted, in the start of the output only (a few cards at most
+  // are shown, and building the whole text of a big block held up its first paint).
+  const [urls, setUrls] = useState<string[]>([]);
+  useEffect(() => {
+    if (!enabled || pm) { setUrls([]); return; }
+    const t = setTimeout(() => setUrls(previewUrls(outputText(out, PREVIEW_SCAN_CHARS))), 0);
+    return () => clearTimeout(t);
+  }, [out, enabled, pm]);
   const [previews, setPreviews] = useState<LinkPreview[]>([]);
   useEffect(() => {
     let live = true;

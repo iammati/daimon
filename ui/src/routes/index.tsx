@@ -1032,22 +1032,24 @@ function Daimon() {
     setSessions((prev) => prev.map((s) => {
       if (s.id !== sessionId) return s;
       const newBlocks = clear ? [] : s.blocks.map((x) => x.id === pendingId ? { ...block, id: pendingId } : x);
-      if (!clear) {
-        shell.blockSave({
-          id: block.id ?? pendingId,
-          session_id: sessionId,
-          input: block.input,
-          cwd: Array.isArray(block.cwd) ? "/" + block.cwd.join("/") : (block.cwd ?? ""),
-          ctx: block.ctx ?? "",
-          ts: block.ts ?? Date.now(),
-          exit_code: block.code ?? 0,
-          output_json: JSON.stringify(block.out ?? []),
-        }).catch(() => {});
-      } else {
-        shell.blockClear(sessionId).catch(() => {});
-      }
       return { ...s, state: next, lastCmd: cmd, blocks: newBlocks };
     }));
+    // Persist once the finished block is on screen: encoding a big block's output takes a
+    // while, and it used to run inside the state update, ahead of the paint.
+    const persist = () => {
+      if (clear) { shell.blockClear(sessionId).catch(() => {}); return; }
+      shell.blockSave({
+        id: block.id ?? pendingId,
+        session_id: sessionId,
+        input: block.input,
+        cwd: Array.isArray(block.cwd) ? "/" + block.cwd.join("/") : (block.cwd ?? ""),
+        ctx: block.ctx ?? "",
+        ts: block.ts ?? Date.now(),
+        exit_code: block.code ?? 0,
+        output_json: JSON.stringify(block.out ?? []),
+      }).catch(() => {});
+    };
+    requestAnimationFrame(() => setTimeout(persist, 0));
     followRef.current.set(sessionId, true);
     scrollToBottom(sessionId);
     setTimeout(() => window.dispatchEvent(new CustomEvent("focus-composer", { detail: { sessionId } })), 1);

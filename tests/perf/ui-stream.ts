@@ -13,7 +13,7 @@ g.sessionStorage = { getItem: () => null, setItem() {} };
 g.WebSocket = class { send() {} close() {} };
 g.requestAnimationFrame = (f: () => void) => setTimeout(f, 0);
 
-const { OutputStream, parseOutput, splitHtmlLines } = await import("../../ui/src/lib/daimon/shell");
+const { OutputStream, parseOutput, splitHtmlLines } = await import("../../ui/src/lib/daimon/parse");
 const { readFileSync } = await import("node:fs");
 
 // Big files: what a PTY read typically carries under load, a snapshot per ~16 ms of output.

@@ -105,6 +105,9 @@ let ws: WebSocket | null = null;
 const pending: string[] = [];
 let failures = 0;
 let everConnected = false;
+
+/** Main-thread time spent on daemon messages (read by bench mode, see bench.ts). */
+export const perf = { msgs: 0, parseMs: 0, outputMs: 0, paintMs: 0 };
 const reconnectListeners = new Set<() => void>();
 
 /** Called after the connection to the daemon came back (not on the first connect). */
@@ -142,8 +145,12 @@ async function connect() {
     setTimeout(connect, 1500);
   };
   ws.onmessage = (e: MessageEvent) => {
+    const t0 = performance.now();
     const ev: DaemonEvent = JSON.parse(e.data as string);
-    if (ev.type === "output") outputListeners.forEach((fn) => fn(ev.tab_id, ev.data));
+    const t1 = performance.now();
+    perf.parseMs += t1 - t0;
+    perf.msgs++;
+    if (ev.type === "output") { outputListeners.forEach((fn) => fn(ev.tab_id, ev.data)); perf.outputMs += performance.now() - t1; }
     else if (ev.type === "exit") exitListeners.forEach((fn) => fn(ev.tab_id, ev.code));
     else if (ev.type === "prompt") {
       let ctx: ShellContext = {};

@@ -5,7 +5,8 @@
 /// and is timed from submit to the frame after its final block was painted. A rAF loop
 /// records the longest gap between frames meanwhile: how unresponsive the UI got.
 /// Results land in the `bench-result` pref (daimon.db) and the console.
-import { shell } from "./rpc";
+import { perf, shell } from "./rpc";
+import { lastWorkerStats } from "./parseClient";
 
 type Spec = { cmds: string[]; reps?: number; warmupMs?: number };
 type Api = { submit: (cmd: string) => Promise<void>; busy: () => boolean };
@@ -62,9 +63,20 @@ export function startBench(api: () => Api) {
         while (api().busy()) await sleep(50);
         await sleep(300);
         const stop = watchFrames();
+        // When output reaches the UI: splits transport (daemon → socket → main thread) from
+        // the work after it.
+        let firstOut = 0, lastOut = 0, outChars = 0;
+        const off = shell.onOutput((_tab, data) => {
+          const t = performance.now();
+          if (!firstOut) firstOut = t;
+          lastOut = t;
+          outChars += data.length;
+        });
+        const p0 = { ...perf };
         const t0 = performance.now();
         await api().submit(cmd);
         const tBlock = performance.now();
+        off();
         await frame();
         await frame();
         const tPainted = performance.now();
@@ -72,6 +84,15 @@ export function startBench(api: () => Api) {
         results.push({
           cmd,
           rep,
+          first_output_ms: firstOut ? r1(firstOut - t0) : null,
+          last_output_ms: lastOut ? r1(lastOut - t0) : null,
+          output_chars: outChars,
+          // main-thread ms: decoding daemon messages / output listeners (parsing) / per-frame snapshots
+          msgs: perf.msgs - p0.msgs,
+          json_ms: r1(perf.parseMs - p0.parseMs),
+          listeners_ms: r1(perf.outputMs - p0.outputMs),
+          snapshot_ms: r1(perf.paintMs - p0.paintMs),
+          worker: lastWorkerStats ? Object.fromEntries(Object.entries(lastWorkerStats).map(([k, v]) => [k, r1(v)])) : null,
           block_ms: r1(tBlock - t0),
           painted_ms: r1(tPainted - t0),
           frames: gaps.length,
